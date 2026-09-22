@@ -20,8 +20,11 @@
 #include <vector>      // For std::vector (like ArrayList in Java)
 #include <cassert>     // For assert() (used in some test frameworks)
 
-#include "bencode/BencodeDecoder.hpp"   // Our decoder class
-#include "bencode/BencodeException.hpp" // Our custom exception
+#include "bencode/BencodeDecoder.hpp"
+#include "bencode/BencodeException.hpp"
+#include "torrent/TorrentParser.hpp"
+#include "torrent/TorrentFile.hpp"
+#include <iomanip>
 
 // =============================================================================
 // TEST TRACKING VARIABLES
@@ -275,20 +278,55 @@ int main() {
     // Error Detection Tests
     // -------------------------------------------------------------------------
     // These should fail (throw exceptions) because input is invalid
-    testTrailingDataDetection();        // "i42eEXTRA" has extra data
-    testInvalidInput();                 // "xyz" is not valid Bencode
+    testTrailingDataDetection();
+    testInvalidInput();
 
     // -------------------------------------------------------------------------
-    // Summary
+    // Torrent Parser Tests
     // -------------------------------------------------------------------------
-    // Print how many tests passed/failed (like JUnit summary)
+    std::cout << "\n=== Torrent Parser Tests ===\n\n";
+
+    try {
+        TorrentFile torrent = TorrentParser::parse("test/ubuntu-24.04.1-desktop-amd64.iso.torrent");
+
+        std::cout << "Announce:      " << torrent.announce << "\n";
+        std::cout << "Name:          " << torrent.name << "\n";
+        std::cout << "Piece length:  " << torrent.pieceLength << " bytes\n";
+        std::cout << "File length:   " << torrent.length << " bytes\n";
+
+        size_t numPieces = torrent.pieces.size() / 20;
+        std::cout << "Num pieces:    " << numPieces << "\n";
+
+        std::cout << "Info hash:     ";
+        for (int i = 0; i < 20; i++) {
+            std::cout << std::hex << std::setfill('0') << std::setw(2)
+                      << (int)torrent.infoHash[i];
+        }
+        std::cout << std::dec << "\n";
+
+        bool ok = true;
+        if (torrent.announce.empty()) { std::cout << "FAIL: announce is empty\n"; ok = false; }
+        if (torrent.name.empty()) { std::cout << "FAIL: name is empty\n"; ok = false; }
+        if (torrent.pieceLength <= 0) { std::cout << "FAIL: pieceLength invalid\n"; ok = false; }
+        if (torrent.length <= 0) { std::cout << "FAIL: length invalid\n"; ok = false; }
+        if (torrent.pieces.size() % 20 != 0) { std::cout << "FAIL: pieces not multiple of 20\n"; ok = false; }
+        if (torrent.infoHash.size() != 20) { std::cout << "FAIL: infoHash not 20 bytes\n"; ok = false; }
+
+        if (ok) {
+            std::cout << "\nPASS: torrent parsed successfully\n";
+            passed++;
+        } else {
+            failed++;
+        }
+    } catch (const std::exception& e) {
+        std::cout << "FAIL: torrent parse threw " << e.what() << "\n";
+        failed++;
+    }
+
+    // Summary
     std::cout << "\n=== Results ===\n";
     std::cout << "Passed: " << passed << "\n";
     std::cout << "Failed: " << failed << "\n";
-
-    // Return 0 if all tests passed, 1 if any failed
-    // This is used by test frameworks to determine success/failure
-    // In Java: System.exit(failed > 0 ? 1 : 0);
     return (failed > 0) ? 1 : 0;
 }
 

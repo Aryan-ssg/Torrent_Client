@@ -18,3 +18,6 @@ compile_commands.json
 *.swo
 *~
 .DS_Store
+
+# Test data
+test/*.torrent

@@ -45,19 +45,16 @@ set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
 # Create an executable (like <packaging>jar</packaging> in Maven)
 # The executable will be named "bittorrent" (or "bittorrent.exe" on Windows)
+find_package(OpenSSL REQUIRED)
+
 add_executable(bittorrent
-    src/main.cpp                    # Main file with test cases
-    src/bencode/BencodeDecoder.cpp  # Bencode decoder implementation
+    src/main.cpp
+    src/bencode/BencodeDecoder.cpp
+    src/torrent/TorrentParser.cpp
 )
 
-# =============================================================================
-# INCLUDE DIRECTORIES
-# =============================================================================
-
-# Tell the compiler where to find header files (.hpp files)
-# This is like setting classpath in Java
-# PRIVATE means these directories are only used when building this target
 target_include_directories(bittorrent PRIVATE include)
+target_link_libraries(bittorrent PRIVATE OpenSSL::Crypto)
 
 # =============================================================================
 # HOW TO BUILD
