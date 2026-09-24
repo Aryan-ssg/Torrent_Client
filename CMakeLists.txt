@@ -46,6 +46,7 @@ set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 # Create an executable (like <packaging>jar</packaging> in Maven)
 # The executable will be named "peerflow" (or "peerflow.exe" on Windows)
 find_package(OpenSSL REQUIRED COMPONENTS SSL Crypto)
+find_package(Threads REQUIRED)
 
 add_executable(peerflow
     src/main.cpp
@@ -53,10 +54,13 @@ add_executable(peerflow
     src/torrent/TorrentParser.cpp
     src/tracker/TrackerRequest.cpp
     src/tracker/HttpTracker.cpp
+    src/net/TcpSocket.cpp
+    src/peer/PeerHandshake.cpp
+    src/peer/FakePeer.cpp
 )
 
 target_include_directories(peerflow PRIVATE include)
-target_link_libraries(peerflow PRIVATE OpenSSL::SSL OpenSSL::Crypto)
+target_link_libraries(peerflow PRIVATE OpenSSL::SSL OpenSSL::Crypto Threads::Threads)
 
 # =============================================================================
 # HOW TO BUILD

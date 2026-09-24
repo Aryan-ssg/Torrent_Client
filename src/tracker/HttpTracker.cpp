@@ -14,19 +14,16 @@
 
 #include "bencode/BencodeDecoder.hpp"
 #include "bencode/BencodeException.hpp"
+#include "net/NetException.hpp"
+#include "net/TcpSocket.hpp"
 
-#include <algorithm>  // For std::min
-#include <cctype>     // For std::tolower
-#include <cstdlib>    // For std::atoi, std::strtoul
-#include <cstring>    // For std::strerror
-#include <map>        // For std::map
-#include <sstream>    // For std::istringstream
+#include <cctype>      // For std::tolower
+#include <cstdlib>     // For std::atoi, std::strtoul
+#include <cstring>     // For std::strerror
+#include <map>         // For std::map
+#include <sstream>     // For std::istringstream
 
 #include <arpa/inet.h>  // inet_ntop, in_addr
-#include <netdb.h>      // getaddrinfo
-#include <netinet/in.h>
-#include <sys/socket.h>
-#include <unistd.h>     // close
 
 #include <openssl/err.h>  // ERR_error_string
 #include <openssl/ssl.h>  // SSL_*, TLS_client_method
@@ -112,32 +109,59 @@ static std::string resolveLocation(const std::string& baseUrl, const std::string
 }
 
 // =============================================================================
-// A live connection: a file descriptor, optionally wrapped in a TLS session.
-// The destructor cleans both up (like Java's try-with-resources).
+// A live connection: a TcpSocket, optionally wrapped in a TLS session.
+// The destructor frees the SSL state (TcpSocket closes its own descriptor,
+// like Java's try-with-resources).
 // =============================================================================
 struct Connection {
-    int fd = -1;
+    TcpSocket socket;
     SSL* ssl = nullptr;
 
     ~Connection() {
         if (ssl) SSL_free(ssl);
-        if (fd >= 0) close(fd);
+    }
+
+    // Copying would duplicate ownership of the socket + SSL - forbid it.
+    Connection(const Connection&) = delete;
+    Connection& operator=(const Connection&) = delete;
+
+    Connection() = default;
+
+    // Moving is fine: the socket is usable after a move, so a connected
+    // Connection can be handed back from a factory function.
+    Connection(Connection&& other) noexcept
+        : socket(std::move(other.socket)), ssl(other.ssl) {
+        other.ssl = nullptr;
+    }
+
+    Connection& operator=(Connection&& other) noexcept {
+        if (this != &other) {
+            if (ssl) SSL_free(ssl);
+            socket = std::move(other.socket);
+            ssl = other.ssl;
+            other.ssl = nullptr;
+        }
+        return *this;
     }
 };
 
 // =============================================================================
-// Send ALL of `data`, looping because send() may accept only part of it.
+// Send ALL of `data`, looping because send() (or SSL_write) may accept only
+// part of it.
 // =============================================================================
 static void sendAll(Connection& c, const std::string& data) {
-    size_t sent = 0;
-    while (sent < data.size()) {
-        int n = c.ssl
-            ? SSL_write(c.ssl, data.data() + sent, static_cast<int>(data.size() - sent))
-            : static_cast<int>(::send(c.fd, data.data() + sent, data.size() - sent, 0));
-        if (n <= 0) {
-            throw BencodeException("Failed to send HTTP request: " + std::string(std::strerror(errno)));
+    if (c.ssl) {
+        size_t sent = 0;
+        while (sent < data.size()) {
+            int n = SSL_write(c.ssl, data.data() + sent,
+                              static_cast<int>(data.size() - sent));
+            if (n <= 0) {
+                throw NetException("TLS send failed");
+            }
+            sent += static_cast<size_t>(n);
         }
-        sent += static_cast<size_t>(n);
+    } else {
+        c.socket.sendAll(data.data(), data.size());
     }
 }
 
@@ -157,7 +181,7 @@ static ssize_t recvSome(Connection& c, char* buf, size_t len) {
         }
         return n;
     }
-    return ::recv(c.fd, buf, len, 0);
+    return c.socket.recvSome(buf, len);
 }
 
 // =============================================================================
@@ -262,45 +286,14 @@ static HttpResponse performRequest(Connection& c, const std::string& requestText
 }
 
 // =============================================================================
-// Open a TCP connection to host:port using DNS lookup (getaddrinfo).
-// We set apply a read timeout so a dead peer can't hang us forever.
-// getaddrinfo is like Java's InetAddress.getAllByName() but C-native, and it
-// iterates ALL returned addresses (IPv4 + IPv6) until one connect() succeeds.
+// Open a TCP connection to host:port. All the dirty work (DNS, socket(),
+// connect(), timeouts) now lives in the shared TcpSocket class. DNS lookup
+// details: see src/net/TcpSocket.cpp.
 // =============================================================================
 static Connection connectTo(const Url& u, int timeoutSeconds) {
     Connection c;
-
-    struct addrinfo hints {};
-    hints.ai_family = AF_UNSPEC;       // IPv4 or IPv6
-    hints.ai_socktype = SOCK_STREAM;   // TCP
-
-    struct addrinfo* results = nullptr;
-    int rc = getaddrinfo(u.host.c_str(), u.port.c_str(), &hints, &results);
-    if (rc != 0) {
-        throw BencodeException("DNS lookup failed for " + u.host + ": " + gai_strerror(rc));
-    }
-
-    for (struct addrinfo* ai = results; ai != nullptr; ai = ai->ai_next) {
-        int fd = socket(ai->ai_family, ai->ai_socktype, ai->ai_protocol);
-        if (fd < 0) continue;
-
-        // SO_RCVTIMEO makes recv() fail (not hang) after the timeout.
-        struct timeval tv {};
-        tv.tv_sec = timeoutSeconds;
-        setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
-
-        if (::connect(fd, ai->ai_addr, ai->ai_addrlen) == 0) {
-            c.fd = fd;
-            break;
-        }
-        close(fd);
-    }
-    freeaddrinfo(results);  // like closing the iterator/results in Java
-
-    if (c.fd < 0) {
-        throw BencodeException("Could not connect to " + u.host + ":" + u.port);
-    }
-    return c;
+    c.socket.connect(u.host, u.port, timeoutSeconds);
+    return c;  // moved out via Connection's move constructor
 }
 
 // =============================================================================
@@ -329,7 +322,7 @@ static void upgradeToTls(Connection& c, const std::string& host) {
     if (!ssl) {
         throw BencodeException("TLS: SSL_new failed");
     }
-    SSL_set_fd(ssl, c.fd);
+    SSL_set_fd(ssl, c.socket.fd());
     SSL_set_tlsext_host_name(ssl, host.c_str());
     SSL_set1_host(ssl, host.c_str());
     SSL_set_verify(ssl, SSL_VERIFY_PEER, nullptr);
