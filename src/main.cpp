@@ -24,6 +24,8 @@
 #include "bencode/BencodeException.hpp"
 #include "torrent/TorrentParser.hpp"
 #include "torrent/TorrentFile.hpp"
+#include "tracker/HttpTracker.hpp"
+#include "tracker/TrackerRequest.hpp"
 #include <iomanip>
 
 // =============================================================================
@@ -320,6 +322,52 @@ int main() {
         }
     } catch (const std::exception& e) {
         std::cout << "FAIL: torrent parse threw " << e.what() << "\n";
+        failed++;
+    }
+
+    // -------------------------------------------------------------------------
+    // Tracker Tests (Phase 3)
+    // -------------------------------------------------------------------------
+    std::cout << "\n=== Tracker Tests ===\n\n";
+
+    try {
+        TorrentFile torrent = TorrentParser::parse("test/ubuntu-24.04.1-desktop-amd64.iso.torrent");
+
+        // NOTE: torrent.ubuntu.com blocks this machine's IP. Real clients add
+        // extra trackers all the time, so we override the announce URL with
+        // tracker.opentrackr.org, which works over HTTPS.
+        TrackerRequest request;
+        request.announceUrl = "https://tracker.opentrackr.org/announce";
+        request.infoHash = torrent.infoHash;
+        request.peerId = generatePeerId();
+        request.port = 6881;            // our (future) listen port
+        request.downloaded = 0;
+        request.uploaded = 0;
+        request.left = torrent.length;  // everything still to download
+        request.event = "started";
+
+        std::cout << "Announce URL:  " << request.buildAnnounceUrl() << "\n\n";
+        std::cout << "Talking to tracker...\n";
+
+        TrackerResponse response = HttpTracker::announce(request);
+
+        if (!response.failureReason.empty()) {
+            std::cout << "FAIL: tracker rejected us: " << response.failureReason << "\n";
+            failed++;
+        } else {
+            std::cout << "interval:      " << response.interval << "s\n";
+            std::cout << "seeders:       " << response.complete << "\n";
+            std::cout << "leechers:      " << response.incomplete << "\n";
+            std::cout << "Peers found:   " << response.peers.size() << "\n";
+            for (size_t i = 0; i < response.peers.size() && i < 10; i++) {
+                std::cout << "  " << response.peers[i].toString() << "\n";
+            }
+
+            std::cout << "\nPASS: tracker announce succeeded\n";
+            passed++;
+        }
+    } catch (const std::exception& e) {
+        std::cout << "FAIL: tracker test threw " << e.what() << "\n";
         failed++;
     }
 

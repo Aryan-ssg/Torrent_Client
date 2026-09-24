@@ -1,6 +1,6 @@
 # Build
 build/
-bittorrent
+peerflow
 *.o
 *.d
 

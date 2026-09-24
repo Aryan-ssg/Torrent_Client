@@ -49,7 +49,7 @@ cmake --build build
 ## How to Run Tests
 
 ```bash
-./build/bittorrent
+./build/peerflow
 ```
 
 ## Key Concepts for Java Developers

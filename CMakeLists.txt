@@ -13,8 +13,8 @@
 #   <dependencies>...</dependencies>
 #
 # In C++ with CMake, you have CMakeLists.txt:
-#   project(bittorrent)
-#   add_executable(bittorrent src/main.cpp)
+#   project(PeerFlow)
+#   add_executable(peerflow src/main.cpp)
 #   target_include_directories(...)
 # =============================================================================
 
@@ -23,7 +23,7 @@ cmake_minimum_required(VERSION 3.14)
 
 # Project name and language (like <artifactId> and <packaging> in Maven)
 # LANGUAGES CXX means we're using C++
-project(bittorrent LANGUAGES CXX)
+project(PeerFlow LANGUAGES CXX)
 
 # =============================================================================
 # COMPILER SETTINGS
@@ -44,17 +44,19 @@ set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 # =============================================================================
 
 # Create an executable (like <packaging>jar</packaging> in Maven)
-# The executable will be named "bittorrent" (or "bittorrent.exe" on Windows)
-find_package(OpenSSL REQUIRED)
+# The executable will be named "peerflow" (or "peerflow.exe" on Windows)
+find_package(OpenSSL REQUIRED COMPONENTS SSL Crypto)
 
-add_executable(bittorrent
+add_executable(peerflow
     src/main.cpp
     src/bencode/BencodeDecoder.cpp
     src/torrent/TorrentParser.cpp
+    src/tracker/TrackerRequest.cpp
+    src/tracker/HttpTracker.cpp
 )
 
-target_include_directories(bittorrent PRIVATE include)
-target_link_libraries(bittorrent PRIVATE OpenSSL::Crypto)
+target_include_directories(peerflow PRIVATE include)
+target_link_libraries(peerflow PRIVATE OpenSSL::SSL OpenSSL::Crypto)
 
 # =============================================================================
 # HOW TO BUILD
@@ -71,10 +73,10 @@ target_link_libraries(bittorrent PRIVATE OpenSSL::Crypto)
 #   cmake --build build
 #
 # This creates:
-#   build/bittorrent  (the executable)
-#   build/bittorrent.exe  (on Windows)
+#   build/peerflow  (the executable)
+#   build/peerflow.exe  (on Windows)
 #
 # In Java terms:
 #   mvn clean package  ->  cmake --build build
-#   java -jar target/app.jar  ->  ./build/bittorrent
+#   java -jar target/app.jar  ->  ./build/peerflow
 # =============================================================================
