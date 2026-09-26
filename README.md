@@ -1,157 +1,88 @@
-# Torrent Client (C++)
+# PeerFlow — a BitTorrent Client in C++
 
-A BitTorrent client implementation in C++, currently featuring a **Bencode decoder** for parsing `.torrent` files.
+PeerFlow is a BitTorrent client built **from scratch in C++17**, one layer at a
+time, with every line written and explained — no magic, no hidden frameworks.
 
-## What is Bencode?
+Current milestone: **20/20 tests passing** through Phase 4 (peer handshake).
 
-Bencode is a simple encoding format used by BitTorrent to store metadata in `.torrent` files. It supports 4 data types:
+> 🍕 The whole project in one breath: read the `.torrent` recipe card, ask a
+> matchmaker (tracker) who else is cooking, shake hands with neighbours
+> (peers), swap verified slices (pieces), and finally save + share the file.
 
-| Type | Format | Example | Java Equivalent |
-|------|--------|---------|-----------------|
-| Integer | `i<number>e` | `i42e` = 42 | `long` |
-| String | `<length>:<content>` | `5:hello` = "hello" | `String` or `byte[]` |
-| List | `l<items>e` | `li42ee` = [42] | `List<Object>` |
-| Dictionary | `d<key><value>e` | `d3:key5:valuee` = {"key": "value"} | `Map<String, Object>` |
+## Status
 
-## Project Structure
+| Phase | What you build | Status |
+|---|---|---|
+| 0 | Setup and tools (CMake, C++17, OpenSSL) | ✅ |
+| 1 | Bencode decoder | ✅ |
+| 2 | Torrent parser + info hash | ✅ |
+| 3 | Tracker announce, get peers | ✅ — real HTTPS tracker: `Peers found: 50` |
+| 4 | Peer handshake | ✅ — verified on loopback; this network blocks peer ports |
+| 5 | Messages + downloading a verified piece | ⬜ next |
+| 6–9 | Piece manager + disk, concurrency, seeding, extras | ⬜ |
 
-```
-Torrent_Client/
-├── CMakeLists.txt              # Build configuration (like pom.xml in Maven)
-├── README.md
-├── include/
-│   └── bencode/
-│       ├── BencodeDecoder.hpp  # Decoder class header
-│       ├── BencodeException.hpp # Custom exception class
-│       └── BencodeValue.hpp    # Universal value type
-└── src/
-    ├── main.cpp                # Test cases
-    └── bencode/
-        └── BencodeDecoder.cpp  # Decoder implementation
-```
+## Start here
 
-## How to Build
+- **[The Complete Guide → `docs/`](docs/README.md)** — a friendly,
+  phase-by-phase manual written for everyone, with all the theory
+  (networking, bencode, hashing, endianness) explained in plain words.
+- The source files are heavily commented with the same tone: one mental model,
+  `why` in the docs, `how` in the code.
 
-```bash
-mkdir build
-cd build
-cmake ..
-make
-```
-
-Or use CMake directly:
+## Quick start
 
 ```bash
 cmake -B build
 cmake --build build
+./build/peerflow          # runs all 20 tests, prints PASS/FAIL + results
 ```
 
-## How to Run Tests
+Requires: a C++17 compiler, CMake ≥ 3.14, OpenSSL. (Similar to `mvn package`
+then `java -jar` if you come from Java.)
 
-```bash
-./build/peerflow
+## Project layout
+
+```
+Torrent_Client/
+├── CMakeLists.txt           # build config (the "pom.xml")
+├── docs/                    # ← the full guide (start here)
+├── include/                 # headers (the "plans")
+│   ├── bencode/             #   Phase 1  decoder
+│   ├── torrent/             #   Phase 2  .torrent parser
+│   ├── tracker/             #   Phase 3  announce + peer list
+│   ├── net/                 #   shared  TcpSocket + exceptions
+│   └── peer/                #   Phase 4  handshake (+ FakePeer test server)
+├── src/                     # implementations (the "real code")
+└── test/                    # the Ubuntu 24.04 .torrent used for testing
 ```
 
-## Key Concepts for Java Developers
+## Features so far
 
-### 1. BencodeValue (Like a Sealed Interface)
+- ✅ Bencode decoding (integers, strings, lists, dicts, nesting) with strict
+  validation — 16 tests
+- ✅ `.torrent` parser extracting announce, name, piece length, size, piece
+  hashes — and the **info hash** computed from the exact raw bytes
+- ✅ Real HTTPS tracker announce (DNS, TCP, TLS, HTTP, redirects, compact
+  peers) against `tracker.opentrackr.org`
+- ✅ 68-byte peer handshake with `recvExact` streaming reads, timeouts, and
+  info-hash verification — proven against a loopback `FakePeer`
+- 🧱 `TcpSocket` reusable network primitive shared by all phases
 
-In Java, you might have:
-```java
-interface BencodeValue {}
-record IntegerValue(long value) implements BencodeValue {}
-record StringValue(byte[] value) implements BencodeValue {}
-record ListValue(List<BencodeValue> value) implements BencodeValue {}
-record DictValue(Map<String, BencodeValue> value) implements BencodeValue {}
-```
+## Known environment notes
 
-In C++, we use a tagged union pattern:
-```cpp
-class BencodeValue {
-    enum Type { INTEGER, STRING, LIST, DICT };
-    // ... fields for each type
-    // ... getter methods like asInteger(), asString(), etc.
-};
-```
+- `torrent.ubuntu.com` restricts by IP range and rejects this machine.
+- This network's firewall allows only a few outbound ports (80/443), so
+  arbitrary peer ports (6881, 51413, …) are unreachable — which is why Phase 4
+  tests run against a local fake peer on `127.0.0.1`.
 
-### 2. Static Factory Methods
+## Roadmap
 
-In Java:
-```java
-BencodeValue val = BencodeValue.of(42);
-```
+Phase 5 — peer wire messages: request 16 KB blocks, assemble a piece, and
+verify its SHA-1 against the torrent's piece hashes.
+Then: piece manager + disk → concurrency → seeding → extras (magnet, UDP
+trackers, DHT).
 
-In C++:
-```cpp
-BencodeValue val = BencodeValue::makeInteger(42);
-```
+## Learning resources
 
-### 3. References vs Pointers
-
-In Java, all object variables are references (like pointers).
-
-In C++:
-```cpp
-// Reference (like Java reference - always valid)
-const std::string& str = something;
-
-// Pointer (can be null, like Java reference)
-std::string* ptr = &something;
-```
-
-### 4. const Keyword
-
-C++ has `const` to indicate "I won't modify this":
-```cpp
-// This method doesn't modify the object
-Type getType() const { return type; }
-
-// This parameter won't be modified
-void print(const std::string& str);
-```
-
-Java doesn't have `const` (it has `final` which is different).
-
-### 5. Exception Handling
-
-Same syntax, slightly different conventions:
-```java
-// Java
-try {
-    decode(input);
-} catch (Exception e) {
-    System.out.println(e.getMessage());
-}
-```
-
-```cpp
-// C++
-try {
-    decode(input);
-} catch (const std::exception& e) {
-    std::cout << e.what() << std::endl;
-}
-```
-
-## Current Features
-
-- ✅ Integer parsing (positive, negative, zero)
-- ✅ String parsing (including empty strings)
-- ✅ List parsing (including nested lists)
-- ✅ Dictionary parsing (including nested dictionaries)
-- ✅ Error detection (trailing data, invalid input)
-- ✅ Comprehensive test suite
-
-## Next Steps (TODO)
-
-- [ ] Parse `.torrent` files
-- [ ] Implement tracker communication
-- [ ] Implement peer wire protocol
-- [ ] Add download/upload functionality
-- [ ] Add piece management
-
-## Learning Resources
-
-- [Bencode specification](https://wiki.theory.org/BitTorrentSpecification#Bencoding)
+- [Big-picture guide (docs)](docs/01-big-picture.md)
 - [BitTorrent specification](https://wiki.theory.org/BitTorrentSpecification)
-- [C++ for Java developers](https://learnxinyminutes.com/docs/c++/)
