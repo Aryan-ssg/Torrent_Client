@@ -39,13 +39,15 @@ Torrent_Client/
 │   ├── torrent/              # Phase 2
 │   ├── tracker/              # Phase 3
 │   ├── net/                  # shared network helper (Phases 3 & 4)
-│   └── peer/                 # Phase 4
+│   ├── peer/                 # Phases 4–7 (handshake, messages, FakePeer, concurrency)
+│   └── piece/                # Phases 6–7 (PieceManager, thread-safe claiming)
 ├── src/                      # .cpp files = "the implementation" (the code itself)
 │   ├── bencode/
 │   ├── torrent/
 │   ├── tracker/
 │   ├── net/
-│   └── peer/
+│   ├── peer/
+│   └── piece/
 └── test/                     # the .torrent file we use for testing
 ```
 
