@@ -371,6 +371,150 @@ Both do the same three things:
 That step 3 is what makes `decode` *total*: it either produces one complete
 value or it refuses — never a partial guess.
 
+## The code, piece by piece (classes, functions, algorithms, techniques)
+
+This section is the "show me the actual machine parts" tour: every user-defined
+class and function, every built-in type we lean on, and the classic techniques
+(patterns) this decoder is an example of. Read it once and the rest of the
+project's code starts looking familiar, because these same shapes repeat in
+every later phase.
+
+### The user-defined classes (three, and only three)
+
+| Class | Header | Its one job | Java cousin |
+|---|---|---|---|
+| `BencodeValue` | `include/bencode/BencodeValue.hpp` | hold one decoded value (int / bytes / list / dict) | a sealed interface with four `record` implementations |
+| `BencodeDecoder` | `include/bencode/BencodeDecoder.hpp` + `.cpp` | read raw bytes and build a `BencodeValue` tree | a `ObjectMapper`/`JsonParser` for bencode |
+| `BencodeException` | `include/bencode/BencodeException.hpp` | "this input is not valid bencode" | a custom `Exception` subclass |
+
+That's the whole object model. Everything else is functions and the standard
+library.
+
+### `BencodeValue` — the tagged union, method by method
+
+It uses the **tagged-union pattern**: one class holds a *type tag* plus one
+slot per shape, and only the slot matching the tag is meaningful. A Java dev
+would more likely write an interface + four records; C++ makes the tag approach
+lightweight and allocation-friendly.
+
+- **Nested `enum Type { INTEGER, STRING, LIST, DICT }`** — the tag. A builtin
+  C++ enum class. (Java: `public enum Type { … }`.) It's the field the getters
+  check.
+- **The four storage fields** (only one is live at a time):
+  `long long intValue`, `std::vector<uint8_t> stringValue`,
+  `std::vector<BencodeValue> listValue`,
+  `std::map<std::string, BencodeValue> dictValue`.
+- **Static factory methods** `makeInteger / makeString / makeList / makeDict` —
+  these are the *only* way values are created. A factory method (a static
+  method that builds and returns an object) instead of four public
+  constructors, so the tag and its data can never get out of sync.
+- **Getters** `getType / asInteger / asString / asList / asDict` — all
+  `const`: they promise not to modify the object (C++'s `const` is like Java's
+  immutable-by-convention).
+- **Helper** `stringValueAsUtf8()` — wraps the byte vector into a
+  `std::string` for convenience.
+
+Why a `std::map` for a dict and not a `std::unordered_map`? A `map` keeps keys
+**sorted**, which matters in Phase 2: the info hash is computed over the
+*re-encoded* `info` dict, and re-encoding a sorted map is deterministic — the
+same recipe always produces the same bytes.
+
+### `BencodeDecoder` — the state machine, method by method
+
+Its three private fields are the whole trick: a pointer to the bytes
+(`data`), the total length (`length`), and a **cursor** (`pos`) that walks
+forward as we read. That trio is a classic **stateful streaming parser** (Java
+devs meet it as a `Cursor`/`BufferedReader` over bytes).
+
+Methods, and the technique each demonstrates:
+
+| Method | Technique | What it does |
+|---|---|---|
+| `BencodeDecoder(data, length)` | constructor + **member-initializer list** `: data(data), length(length), pos(0)` | sets up the cursor state |
+| `parse(size_t depth)` | **recursive-descent dispatch** — look at one byte, call the right sub-parser; recurse for containers | the brain; also the **nesting cap** (`depth > 200` → throw) |
+| `parseInteger()` | manual digit loop with **overflow guard** (`checkedAppendDigit`) and spec-strict zero rules | `i42e` → 42 |
+| `parseString()` | read a length, **bounds-check** it against remaining bytes, then copy exactly that many | `5:hello` → "hello" |
+| `parseList(depth)` | **accumulate-into-a-vector** + recursion per item | `li42ee` → [42] |
+| `parseDictionary(depth)` | loop key/value pairs into a `map`; keys forced to be strings | `d…e` → {…} |
+| `decode(bytes)` / `decode(string)` | **static factory entry point** + a **trailing-data check** (`pos == length`) | the public API; "one value or fail" |
+
+### The free (non-member) function: `checkedAppendDigit`
+
+Phase 1 has exactly one standalone function, and it exists for a security
+reason:
+
+```cpp
+long long checkedAppendDigit(long long value, uint8_t b, size_t pos) {
+    long long digit = b - '0';
+    if (value > (LLONG_MAX - digit) / 10) {   // would overflow?
+        throw BencodeException("Number overflows 64-bit signed range …");
+    }
+    return value * 10 + digit;
+}
+```
+
+Technique: **overflow prevention before arithmetic**. In C++ an overflowing
+signed integer is *undefined behaviour* (the compiler may assume it never
+happens and optimize the check away), so we must test the *maximum possible
+result* before computing it. The same helper guards both the integer value
+and the string length — and for the length there's a second, subtler reason:
+if a length overflowed and wrapped *negative*, casting it to `size_t` would
+wrap around to a huge number and defeat the bounds check. Refusing to overflow
+keeps the value non-negative forever, so the `size_t` cast is always safe.
+
+### The built-in types we rely on (and their Java equivalents)
+
+| Built-in (C++ standard library / keyword) | What it gives us | Java equivalent |
+|---|---|---|
+| `std::vector<T>` | a growable, contiguous array — used for byte strings *and* for list values | `ArrayList<T>` |
+| `std::map<K,V>` | a **key-sorted** dictionary — used for dict values | `TreeMap<K,V>` |
+| `std::string` | a growable text/byte string | `String` |
+| `uint8_t` | an unsigned 8-bit value (one byte) | `byte` |
+| `long long` | a 64-bit signed integer — bencode's only number type | `long` |
+| `const` / `&` (`const&`) | "won't change this" / "pass by reference, don't copy" | `final` / all objects-by-reference |
+| `namespace { }` | a **private-to-this-file** scope — our one helper is invisible outside `BencodeDecoder.cpp` | (Java uses `private static`) |
+| `enum` | the type tag | `enum` |
+| `throw` / `try` / `catch` | error propagation out of the parse | same in Java |
+
+### The algorithms/patterns this file is a textbook example of
+
+1. **Recursive-descent parsing** — one dispatch function plus one sub-parser
+   per grammar rule; nesting is handled by the parser calling *itself*. (Like
+   writing a JSON parser with `parseArray()` calling `parse()` per element.)
+2. **Tagged union** — one class + a type tag instead of a class hierarchy.
+3. **Cursor/stateful scanning** — a `pos` index walking a byte buffer, always
+   bounds-checked before each read.
+4. **Accumulator pattern** — list/dict parsers loop, calling a sub-parser and
+   `push_back` / `operator[]`-ing the result into a growing container.
+5. **Fail-fast validation** — every parser validates *before* it consumes
+   (digit checks, bounds checks, terminator checks) and throws a
+   `BencodeException` carrying the position, instead of returning a
+   half-parsed value.
+6. **Totality via a post-condition** — `decode()` finishes by checking
+   `pos == length`; that one assertion is what makes "one value or fail"
+   airtight (no trailing-garbage tolerance).
+7. **Bounded recursion** — a `depth` counter threaded through the recursive
+   calls, capping nesting at `kMaxNestingDepth = 200` so hostile input becomes
+   a clean exception, not a stack-overflow crash. (The seed planted in this
+   chapter, harvested in the hardening phase.)
+8. **Static factory methods** — `makeInteger/makeString/...` and `decode(...)`
+   construct instances, keeping construction logic in one place and hiding the
+   raw constructor.
+9. **Header/implementation split** — declarations in `.hpp`, bodies in `.cpp`
+   (the "menu vs. the kitchen" separation from Phase 0).
+
+### A one-paragraph mental model
+
+> A `BencodeValue` is a tagged box; a `BencodeDecoder` is a cursor-walking
+> state machine that fills boxes by calling itself; `checkedAppendDigit` is the
+> bodyguard that stops one number from overflowing; and every method is armed
+> to throw a `BencodeException` rather than trust the input. Everything else is
+> standard-library containers doing the bookkeeping.
+
+That's the complete anatomy of Phase 1 — and, happily, almost every one of
+these patterns shows up again in the later phases (streams in Phase 3,
+length-prefixed frames in Phases 4–5, mutex-guarded state in Phase 7).
+
 ## The 16 tests that prove Phase 1
 
 Every test in `src/main.cpp` is a two-player game: feed a string of bytes,
@@ -414,8 +558,14 @@ Failed: 0
 Recursion is wonderful, but a *pathologically nested* input could recurse very
 deeply. Real `.torrent` files are shallow (a handful of levels), so it's a
 non-issue today — but it's exactly the kind of thing that becomes a hardening
-feature in Phase 7 ("never trust the network" grows up to mean "bound your
+feature later ("never trust the network" grows up to mean "bound your
 recursion too"). Good to have noticed it now.
+
+> **Resolved (parser-hardening pass).** That seed was harvested: `parse()` now
+> carries a `depth` counter capped at `kMaxNestingDepth = 200`, so
+> `lllll…` × 201 is a clean `BencodeException` while 100 levels still parse
+> fine — and the integer/string-length digit runs got the `checkedAppendDigit`
+> overflow guard described above.
 
 ## Tie it back to the big picture
 
