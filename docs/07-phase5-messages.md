@@ -153,6 +153,159 @@ The test also proves the currency of honesty: the client's SHA-1 gate rejects
 a piece the *seeder knows* is wrong. Both sides distrust the data until the
 hash says otherwise.
 
+## The code, piece by piece (classes, functions, algorithms, techniques)
+
+The same tour as Phases 1–4.
+
+### The user-defined types
+
+| Type | Header | Its one job | Java cousin |
+|---|---|---|---|
+| `PeerMessage` (**struct**) | `include/peer/PeerMessage.hpp` | one decoded message: `id` + `payload` | a DTO / record |
+| `PieceDownloader` (**class**) | `include/peer/PieceDownloader.hpp` + `.cpp` | run the full conversation for ONE piece; all-`static` | a static service class |
+| `PieceDownloader::Result` (**struct**) | same header | `{ok, error, data}` — verdict + the verified bytes | a result record |
+| `waitFor(...)` (file-local `static`) | `src/peer/PieceDownloader.cpp` | read messages until a wanted id shows up | a polling helper |
+| `putU32BE` / `getU32BE` (file-local `static`) | `src/peer/PeerMessage.cpp` | big-endian pack/unpack for 32-bit numbers | `ByteBuffer` with `BIG_ENDIAN` |
+| `PeerHandshake` (reused) | `include/peer/PeerHandshake.hpp` | Phase 4's `exchange()` over an open socket | — |
+| `TcpSocket` (reused) | `include/net/TcpSocket.hpp` | `sendAll` / `recvExact` under the framing | — |
+
+A design note worth stating plainly: this layer is **mostly free functions**,
+not a class. Framing (`sendMessage`/`readMessage`) and the payload codecs are
+pure functions over a socket — they hold no state, so making them methods
+would be noise. Only the *orchestration* (`PieceDownloader::download`) is a
+class member. That's a healthy instinct: reach for a class when there's state
+to own, not by default.
+
+### The framing layer — `sendMessage` / `readMessage`
+
+| Function | Technique | What it does |
+|---|---|---|
+| `putU32BE(out[4], v)` / `getU32BE(p)` | **explicit endianness conversion by bit-shifting** | write/read a `uint32_t` most-significant-byte-first |
+| `sendMessage(sock, id, payload)` | **frame construction** | length = `1 + payload.size()`, `putU32BE` it into a 5-byte header with the id, `sendAll` header then payload |
+| `sendMessage(sock, id)` | **overload** | id-only messages (`CHOKE`/`UNCHOKE`/`INTERESTED`) delegate with an empty payload |
+| `readMessage(sock)` | **length-prefixed deserialisation** in a skip-loop | `recvExact` 4 length bytes → decode → maybe skip keep-alive → sanity-check → `recvExact` the body → split id/payload |
+
+`readMessage` is the most interesting function in the project so far, because
+it is where four defensive decisions stack up:
+
+1. **`recvExact(lenBytes, 4)`** — the length prefix itself needs an
+   exactly-N read (TCP gave us no boundaries).
+2. **Keep-alive skip** — `if (length == 0) continue;`. A zero length means
+   "nothing to say", so the loop reads the next frame instead of returning a
+   bogus empty message.
+3. **Size cap** — `if (length > kMaxPeerMessageSize) throw`. This is the
+   single most important line: without it, a malicious peer could claim a
+   2 GB message and we'd try to allocate it, turning a protocol attack into an
+   out-of-memory crash. Bounded allocation from untrusted input.
+4. **Underflow check** — `if (length < 1) throw` catches the impossible
+   "length says there's no id byte" case cleanly instead of reading
+   `body[0]` out of bounds.
+
+### The payload codecs — four small functions
+
+| Function | Technique | Notes |
+|---|---|---|
+| `buildRequestPayload(index, begin, length)` | **fixed-layout serialisation** | allocates 12 bytes, `putU32BE`s the three numbers at offsets 0/4/8 |
+| `parseRequestPayload(payload, …)` | **out-parameters** (`uint32_t&`) + size guard | `if (payload.size() != 12) return false;` then decode |
+| `buildPiecePayload(index, begin, data, len)` | fixed layout + **`std::memcpy`** for the variable tail | 8-byte header + the raw bytes |
+| `parsePiecePayload(payload, …)` | **zero-copy view** | returns a *pointer into* the payload (`data = payload.data() + 8`) and a length — no copy at all |
+
+Two techniques to notice:
+
+- **Out-parameters.** C++ has no multiple return values, so parse functions
+  write through references: `bool parse(..., uint32_t& index, uint32_t& begin,
+  size_t& len)`. It reads backwards in C++ style, but it means "return
+  success/failure" plus "fill in the answers" without allocating a struct.
+- **Zero-copy parsing.** `parsePiecePayload` hands back a *pointer into the
+  existing buffer* rather than a fresh copy — the piece bytes are then
+  `insert`ed straight into the assembly buffer. For a 256 KiB piece that's
+  real work avoided, and it's idiomatic C++ (Java's `ByteBuffer` views do the
+  same job).
+
+### `PieceDownloader::download()` — the orchestrator, step by step
+
+| Step | Code | Technique |
+|---|---|---|
+| 0 | `if (expectedHash.size() != 20) return error` | **validate the caller's own inputs first** — a programming-error guard before any I/O |
+| 1 | `socket.connect(...)` | Phase 3's `TcpSocket` (DNS + timeout) |
+| 2 | `PeerHandshake::exchange(...)` | Phase 4, reused verbatim over the same socket |
+| 3 | `sendMessage(socket, MSG_INTERESTED)` | protocol politeness |
+| 4 | `waitFor(socket, MSG_UNCHOKE, …)` | **tolerant polling**: skip `BITFIELD`/`HAVE`/`CHOKE` chatter until the id we want arrives, with a `kMaxMessagesToWait = 200` cap so a peer that never unchokes (or floods us with noise) fails politely instead of hanging |
+| 5 | `while (begin < pieceLength) { … }` | **block-by-block assembly loop** with `std::min(kBlockSize, …)` for the short tail, `reserve()` up front, and a triple check per block: `gotIndex == pieceIndex && gotBegin == begin && dataLen == blockLen` |
+| 6 | `SHA1(assembled…)` + `std::equal(actual, expectedHash)` | the **hash gate** |
+| 7 | `result.data = std::move(assembled)` | move, don't copy — the piece is handed over with zero copies |
+
+Two details that show real care:
+
+- **The `gotIndex/gotBegin/dataLen` triple-check** (step 5) is
+  defence-in-depth *before* the hash: a peer that answers with the wrong piece
+  number, the wrong offset, or the wrong length is rejected with a precise
+  error message, so the hash never even has to run. (The hash would catch it
+  anyway — but failing early with a clear reason is better engineering.)
+- **`std::move(assembled)`** into `result.data`: the local buffer is being
+  handed to the caller, and a move transfers the pointer instead of copying
+  up to 256 KiB. (This is why `Result` is a plain struct — move-friendly by
+  design.)
+- The whole body sits inside one `try { … } catch (const std::exception& e)
+  { result.error = e.what(); }`, continuing the Phase 4 contract: **this
+  function reports, it doesn't propagate.**
+
+### The built-in types we rely on here
+
+| Built-in | What it gives us | Java equivalent |
+|---|---|---|
+| `std::memcpy` | copy the raw block into a payload buffer | `System.arraycopy` |
+| `std::min` | clamp each block to 16 KiB (and the tail) | `Math.min` |
+| `std::equal` | byte-exact 20-byte hash comparison | `Arrays.equals` |
+| `std::move` | transfer a buffer without copying | (no direct equivalent) |
+| `vector::reserve` | pre-size a buffer to avoid reallocations | `new byte[len]` up front |
+| `vector::insert` | append a range to a growing buffer | `System.arraycopy` at an offset |
+| out-params (`uint32_t&`) | multiple return values | a returned `Optional`/record, or a small mutable holder |
+| `enum : uint8_t` (`MSG_*`) | strongly-typed message ids | `enum` / constants |
+| `constexpr size_t` (`kBlockSize`, `kMaxPeerMessageSize`) | compile-time protocol constants | `static final` |
+| `vector::assign(ptr, ptr+n)` | copy a sub-range into the payload | `Arrays.copyOfRange` |
+
+### The algorithms/patterns this phase is a textbook example of
+
+1. **Length-prefixed framing** — every message declares its own size, which is
+   what makes `recvExact` sufficient forever after.
+2. **Big-endian serialisation helpers** — `putU32BE`/`getU32BE` isolate the
+   endianness problem in two 4-line functions used by everything else.
+3. **Bounded allocation from untrusted input** — the `kMaxPeerMessageSize`
+   check before `std::vector<uint8_t> body(length)`.
+4. **Tolerant message polling** (`waitFor`) — skip irrelevant ids, with a
+   message-count cap so noise can't become a hang.
+5. **Block-wise assembly** — request 16 KiB at a time, `insert` each reply at
+   its offset, `reserve()` the total up front.
+6. **Validate every echoed field** — index/begin/length must match what we
+   asked for before the bytes are trusted.
+7. **Hash-gated acceptance** — SHA-1 against the torrent's own fingerprint is
+   the only path to `ok = true`.
+8. **Zero-copy parsing + move semantics** — return views into buffers, hand
+   ownership over with `std::move`.
+9. **Overloading for convenience** — `sendMessage(sock, id)` delegates to the
+   payload version.
+10. **Exception → verdict** (once more) — every failure becomes
+    `Result{ok=false, error="…"}`.
+11. **Reuse of earlier phases** — `TcpSocket` and `PeerHandshake` are used
+    unchanged; Phase 5 adds only the new layer.
+
+### A one-paragraph mental model
+
+> Phase 5 is **two thin layers over Phase 4's socket**. The framing layer turns
+> a byte stream into `PeerMessage{id, payload}` values: read 4 length bytes
+> exactly, skip keep-alives, refuse absurd sizes, then read the body exactly
+> and split off the id. The codec layer converts that payload into numbers
+> (REQUEST: index/begin/length; PIECE: index/begin + a *view* of the data),
+> with `putU32BE`/`getU32BE` hiding the byte-order problem. On top sits
+> `PieceDownloader::download`, the orchestrator: connect → handshake →
+> INTERESTED → wait for UNCHOKE (tolerantly, with a cap) → request each 16 KiB
+> block and verify index/begin/length → assemble → **SHA-1 and compare** →
+> return the verified bytes by move. The techniques underneath:
+> length-prefixed framing, big-endian serialisation, bounded allocation,
+> tolerant polling, block assembly, hash-gated acceptance, zero-copy views,
+> and move semantics.
+
 ## Java parallels
 
 This is a request/response protocol over a stream — think of building a
