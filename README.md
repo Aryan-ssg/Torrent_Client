@@ -22,7 +22,7 @@ nesting).
 | 4 | Peer handshake | ✅ — verified on loopback; this network blocks peer ports |
 | 5 | Messages + downloading a verified piece | ✅ — loopback seeder: request 16 KiB blocks, assemble, SHA-1 verify |
 | 6 | Piece manager + disk + resume | ✅ — fetch all pieces, verify + write at correct offset, `scanDisk()` resume |
-| 7 | Concurrency (many peers) | ✅ — N worker threads, each pinned to its own peer; claim states stop duplicate downloads; 8 pieces in ~250 ms vs ~960 ms sequential |
+| 7 | Concurrency (many peers) | ✅ — N worker threads share a mutex-guarded PieceManager; claim states stop duplicate downloads; work spread across peers per piece; 8 pieces in ~250 ms vs ~960 ms sequential |
 | 8–9 | Seeding, extras | ⬜ |
 
 ## Start here
