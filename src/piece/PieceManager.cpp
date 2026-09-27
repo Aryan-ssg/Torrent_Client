@@ -31,6 +31,15 @@ std::vector<uint8_t> readPiece(std::fstream& file, long pieceOffset, size_t len)
     file.seekg(static_cast<std::streamoff>(pieceOffset));
     file.read(reinterpret_cast<char*>(bytes.data()),
               static_cast<std::streamsize>(len));
+    // A SHORT READ must not be mistaken for success. Without this check the
+    // tail of `bytes` would keep its zero-initialised (stale) values and get
+    // hashed as if it were real data. Shrinking to what we actually read lets
+    // the caller's size==expected check catch it, which would fail the hash
+    // and mark the piece as NOT owned (safe resume behaviour).
+    std::streamsize got = file.gcount();
+    if (got >= 0 && static_cast<size_t>(got) < len) {
+        bytes.resize(static_cast<size_t>(got));
+    }
     return bytes;
 }
 

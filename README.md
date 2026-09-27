@@ -3,8 +3,9 @@
 PeerFlow is a BitTorrent client built **from scratch in C++17**, one layer at a
 time, with every line written and explained — no magic, no hidden frameworks.
 
-Current milestone: **29/29 tests passing** through Phase 6 (owning pieces and
-writing a verified file to disk, with resume support).
+Current milestone: **32/32 tests passing** through Phase 6 (owning pieces and
+writing a verified file to disk, with resume support; hardened parser against
+overflow + runaway nesting).
 
 > 🍕 The whole project in one breath: read the `.torrent` recipe card, ask a
 > matchmaker (tracker) who else is cooking, shake hands with neighbours
@@ -36,7 +37,7 @@ writing a verified file to disk, with resume support).
 ```bash
 cmake -B build
 cmake --build build
-./build/peerflow          # runs all 29 tests, prints PASS/FAIL + results
+./build/peerflow          # runs all 32 tests, prints PASS/FAIL + results
 ```
 
 Requires: a C++17 compiler, CMake ≥ 3.14, OpenSSL. (Similar to `mvn package`
@@ -79,6 +80,10 @@ hashes — verified on a loopback seeder, including the shorter final piece
   the pieces that failed the hash — including detecting one deliberately
   corrupted byte on disk
 - 🧱 `TcpSocket` reusable network primitive shared by all phases
+- ✅ Parser hardening: 64-bit overflow guards on every digit run (integers and
+  string lengths), a 200-level nesting cap that turns adversarial `llll...` input
+  into a clean error instead of a stack crash, and strict BEP-3 zero rules
+  (rejects `i03e`, `i-0e`)
 
 ## Known environment notes
 

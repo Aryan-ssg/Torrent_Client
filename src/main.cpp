@@ -33,6 +33,7 @@
 #include "piece/PieceManager.hpp"
 #include <iomanip>
 #include <algorithm>   // For std::min, std::equal
+#include <cstdio>      // For std::remove (reset test files between runs)
 #include <openssl/sha.h>  // For SHA1 (synthetic torrent piece hashes)
 #include <fstream>     // For std::ifstream / std::fstream (Phase 6 disk checks)
 
@@ -243,6 +244,96 @@ static void testInvalidInput() {
     }
 }
 
+// Test that a digit run long enough to overflow the 64-bit accumulator is
+// rejected as a clean error (no UB). Both the integer form and the
+// string-length form are checked.
+static void testOverflowRejection() {
+    const std::string thirtyNines(30, '9');
+    const std::string intOverflow = "i" + thirtyNines + "e";
+    const std::string strOverflow = thirtyNines + ":";
+
+    bool intRejected = false;
+    try {
+        BencodeDecoder::decode(intOverflow);
+    } catch (const BencodeException&) {
+        intRejected = true;
+    }
+    bool strRejected = false;
+    try {
+        BencodeDecoder::decode(strOverflow);
+    } catch (const BencodeException&) {
+        strRejected = true;
+    }
+
+    if (intRejected && strRejected) {
+        std::cout << "PASS: overflow rejected (integer + string length)\n";
+        passed++;
+    } else {
+        std::cout << "FAIL: overflow handling (intRejected=" << intRejected
+                  << " strRejected=" << strRejected << ")\n";
+        failed++;
+    }
+}
+
+// BEP 3 forbids leading zeros ("i03e") and negative zero ("i-0e"), while a
+// plain "i0e" must still parse to 0.
+static void testZeroFormsRejection() {
+    size_t rejected = 0;
+    for (const char* bad : {"i03e", "i-0e", "i00e"}) {
+        try {
+            BencodeDecoder::decode(bad);
+        } catch (const BencodeException&) {
+            rejected++;
+        }
+    }
+
+    bool zeroOk = false;
+    try {
+        BencodeValue v = BencodeDecoder::decode("i0e");
+        zeroOk = v.getType() == BencodeValue::INTEGER && v.asInteger() == 0;
+    } catch (...) {
+    }
+
+    if (rejected == 3 && zeroOk) {
+        std::cout << "PASS: leading zeros / negative zero rejected, i0e still parses\n";
+        passed++;
+    } else {
+        std::cout << "FAIL: zero-form handling (rejected=" << rejected
+                  << " zeroOk=" << zeroOk << ")\n";
+        failed++;
+    }
+}
+
+// A crafted input with 201 nested lists must throw a clean error instead of
+// exhausting the stack, while legitimately deep (100-level) nesting still
+// parses fine.
+static void testDepthLimit() {
+    const std::string deep = std::string(201, 'l') + "i1e" + std::string(201, 'e');
+    bool threw = false;
+    try {
+        BencodeDecoder::decode(deep);
+    } catch (const BencodeException& e) {
+        threw = std::string(e.what()).find("nesting") != std::string::npos;
+    }
+
+    const std::string shallow = std::string(100, 'l') + "i1e" + std::string(100, 'e');
+    bool shallowOk = false;
+    try {
+        BencodeValue v = BencodeDecoder::decode(shallow);
+        shallowOk = v.getType() == BencodeValue::LIST;
+    } catch (...) {
+    }
+
+    if (threw && shallowOk) {
+        std::cout << "PASS: nesting depth capped (201 throws, 100 still parses)\n";
+        passed++;
+    } else {
+        std::cout << "FAIL: depth cap (threw=" << threw
+                  << " shallowOk=" << shallowOk << ")\n";
+        failed++;
+    }
+}
+
 // =============================================================================
 // PHASE 5 TEST SCENARIO: a small SYNTHETIC torrent we generate in memory
 // =============================================================================
@@ -412,6 +503,9 @@ int main() {
     // These should fail (throw exceptions) because input is invalid
     testTrailingDataDetection();
     testInvalidInput();
+    testOverflowRejection();
+    testZeroFormsRejection();
+    testDepthLimit();
 
     // -------------------------------------------------------------------------
     // Torrent Parser Tests
@@ -742,6 +836,7 @@ int main() {
         //    pieces 0-2 are already owned and only fetch the remaining 5.
         {
             const std::string outPath = "build/phase6-resume.bin";
+            std::remove(outPath.c_str());  // a previous run may have left a COMPLETE file
             TorrentFile t = makeSyntheticTorrent(kSynPieceLen, k6Total);
             std::vector<uint8_t> content = syntheticContent(kSynPieceLen, k6Total);
 

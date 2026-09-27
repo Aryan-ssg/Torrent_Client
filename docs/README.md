@@ -25,7 +25,7 @@ reference while browsing the code.
 | [04 – Phase 2: Torrent parser](04-phase2-parser.md) | Reading a `.torrent` file and computing its info hash | announce URL, pieces, info hash, why we must not re-encode |
 | [05 – Phase 3: Tracker](05-phase3-tracker.md) | Asking a matchmaker for peers over the internet | HTTP, TCP, DNS, TLS/HTTPS, compact peers, endianness |
 | [06 – Phase 4: Peer handshake](06-phase4-handshake.md) | The first 68 bytes two clients exchange | the handshake layout, TCP streams, timeouts, testing on your own computer |
-| [07 – Reference](07-reference.md) | Everything reusable + the full file map + the test suite | our `TcpSocket`, exceptions, "never trust the network", all 29 tests |
+| [07 – Reference](07-reference.md) | Everything reusable + the full file map + the test suite | our `TcpSocket`, exceptions, "never trust the network", all 32 tests |
 
 ## Where the actual code lives
 

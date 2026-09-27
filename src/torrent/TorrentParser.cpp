@@ -1,9 +1,31 @@
 #include "torrent/TorrentParser.hpp"
 #include "bencode/BencodeDecoder.hpp"
 #include "bencode/BencodeException.hpp"
+#include <climits>   // For LLONG_MAX (overflow guard below)
 #include <fstream>
 #include <sstream>
 #include <openssl/sha.h>
+
+// How deep skipBencodeValue() may recurse. BencodeDecoder already caps real
+// decoding at 200 (this parser decodes the file fully before touching the raw
+// byte walkers below), so this is defence-in-depth for the skip walker too.
+static constexpr size_t kMaxSkipDepth = 200;
+
+namespace {
+
+// Same overflow guard the bencode decoder uses: digit runs come from an
+// untrusted .torrent file, and overflowing signed long long is undefined
+// behavior in C++. Refuse instead.
+long long checkedAppendDigit(long long value, uint8_t b, size_t pos) {
+    long long digit = b - '0';
+    if (value > (LLONG_MAX - digit) / 10) {
+        throw BencodeException(
+            "Number overflows 64-bit signed range at position " + std::to_string(pos));
+    }
+    return value * 10 + digit;
+}
+
+}  // namespace
 
 std::vector<uint8_t> TorrentParser::readFile(const std::string& filepath) {
     std::ifstream file(filepath, std::ios::binary);
@@ -17,7 +39,11 @@ std::vector<uint8_t> TorrentParser::readFile(const std::string& filepath) {
     return bytes;
 }
 
-static size_t skipBencodeValue(const std::vector<uint8_t>& raw, size_t pos) {
+static size_t skipBencodeValue(const std::vector<uint8_t>& raw, size_t pos, size_t depth = 0) {
+    if (depth > kMaxSkipDepth) {
+        throw BencodeException("Bencode nesting deeper than " +
+                               std::to_string(kMaxSkipDepth) + " while skipping");
+    }
     if (pos >= raw.size()) {
         throw BencodeException("Unexpected end while skipping value");
     }
@@ -33,14 +59,14 @@ static size_t skipBencodeValue(const std::vector<uint8_t>& raw, size_t pos) {
         // List or dict: skip opening, then skip each element until 'e'
         pos++; // skip 'l' or 'd'
         while (pos < raw.size() && raw[pos] != 'e') {
-            pos = skipBencodeValue(raw, pos);
+            pos = skipBencodeValue(raw, pos, depth + 1);
         }
         return pos + 1; // past 'e'
     } else if (b >= '0' && b <= '9') {
         // String: <len>:<bytes>
         long long strLen = 0;
         while (pos < raw.size() && raw[pos] != ':') {
-            strLen = strLen * 10 + (raw[pos] - '0');
+            strLen = checkedAppendDigit(strLen, raw[pos], pos);
             pos++;
         }
         pos++; // skip ':'
@@ -74,7 +100,7 @@ size_t TorrentParser::findInfoValueStart(const std::vector<uint8_t>& raw) {
         long long keyLen = 0;
         size_t keyStart = pos;
         while (pos < raw.size() && raw[pos] != ':') {
-            keyLen = keyLen * 10 + (raw[pos] - '0');
+            keyLen = checkedAppendDigit(keyLen, raw[pos], pos);
             pos++;
         }
         pos++; // skip ':'
@@ -123,7 +149,7 @@ size_t TorrentParser::findDictEnd(const std::vector<uint8_t>& raw, size_t dictSt
             // String: <len>:<bytes> — skip it entirely
             long long strLen = 0;
             while (pos < raw.size() && raw[pos] != ':') {
-                strLen = strLen * 10 + (raw[pos] - '0');
+                strLen = checkedAppendDigit(strLen, raw[pos], pos);
                 pos++;
             }
             pos++; // skip ':'

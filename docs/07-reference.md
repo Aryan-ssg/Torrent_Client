@@ -116,7 +116,7 @@ Every phase applies these in code:
 ```bash
 cmake -B build          # configure
 cmake --build build     # compile
-./build/peerflow        # run all 29 tests
+./build/peerflow        # run all 32 tests
 ```
 
 A completely clean rebuild (if things ever feel stale):
@@ -137,7 +137,8 @@ Phase 5  Messages + pieces     ✅ done  (loopback seeder: 3 pieces downloaded &
                                         corrupted piece rejected)
 Phase 6  Piece manager + disk  ✅ done  (8-piece synthetic file downloaded to disk and
                                         byte-verified; resume + disk-corruption recovery;
-                                        storePiece gate; 29 tests total)
+                                        storePiece gate; hardened parser (overflow +
+                                        nesting-depth caps); 32 tests total)
 Phase 7  Many peers            ⬜ concurrency
 Phase 8  Upload / seeding      ⬜ listening + tit-for-tat
 Phase 9  Extras                ⬜ magnet links, UDP trackers, DHT

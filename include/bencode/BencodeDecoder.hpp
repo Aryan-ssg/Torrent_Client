@@ -43,13 +43,26 @@ private:
     size_t pos;           // Current position we're reading from (like a cursor)
 
     // =========================================================================
+    // RECURSION DEPTH CAP
+    // =========================================================================
+    // parse() calls itself for every nested list/dict. A hostile tracker reply
+    // or crafted .torrent with thousands of nested "llll...e" would otherwise
+    // grow the C++ call stack until the process crashes -- a denial of service.
+    // We bound how deep legitimate nesting may go; anything deeper becomes a
+    // clean BencodeException instead of a crash. (Real torrents/tracker
+    // responses nest a handful of levels, so 200 is very generous.)
+    static constexpr size_t kMaxNestingDepth = 200;
+
+    // =========================================================================
     // PRIVATE PARSING METHODS (Recursive Descent Parser)
     // =========================================================================
     // These methods parse different parts of the Bencode format
     // They're recursive because lists and dicts can contain other lists/dicts
 
-    // Main parse method - determines what type to parse based on current byte
-    BencodeValue parse();
+    // Main parse method - determines what type to parse based on current byte.
+    // `depth` = how many lists/dicts we are currently nested inside; the cap
+    // above turns runaway nesting into a clean error.
+    BencodeValue parse(size_t depth);
 
     // Parses an integer: starts with 'i', ends with 'e'
     // Example: "i42e" -> 42
@@ -61,11 +74,11 @@ private:
 
     // Parses a list: starts with 'l', ends with 'e'
     // Example: "li42ee" -> [42]
-    BencodeValue parseList();
+    BencodeValue parseList(size_t depth);
 
     // Parses a dictionary: starts with 'd', ends with 'e'
     // Example: "d3:cow3:moo4:spami42ee" -> {"cow": "moo", "spam": 42}
-    BencodeValue parseDictionary();
+    BencodeValue parseDictionary(size_t depth);
 
 public:
     // =========================================================================
