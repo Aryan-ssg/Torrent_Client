@@ -335,6 +335,140 @@ Read a `name` or `length` quickly via the decoded map. Hash the info dict
 correctly via the raw bytes. Mixing the two — decoding *then re-encoding* for
 the hash — is precisely the bug the "don't re-encode" rule exists to prevent.
 
+## The code, piece by piece (classes, functions, algorithms, techniques)
+
+Same tour as Phase 1: every user-defined class and function, every built-in we
+lean on, and the named techniques this parser is a textbook example of.
+
+### The user-defined types (a struct, a class, and one struct reuse)
+
+| Type | Header | Its one job | Java cousin |
+|---|---|---|---|
+| `TorrentFile` (**struct**) | `include/torrent/TorrentFile.hpp` | a plain data holder for the facts we extracted | a POJO / record |
+| `TorrentParser` (**class**) | `include/torrent/TorrentParser.hpp` + `.cpp` | read a `.torrent` file → a `TorrentFile` | a static utility / service class |
+| `BencodeValue` (reused) | `include/bencode/BencodeValue.hpp` | Phase 1's decoded tree, which we *query* for fields | a parsed JSON node |
+
+Two things to notice in that table: `TorrentFile` is a **`struct`**, not a
+class — in C++ the difference is only default access (struct = public,
+class = private); we use `struct` to say "just data". And `TorrentParser` is
+**all `static`**: it has no state, so it exposes static methods and is never
+instantiated. That's the "utility class" idiom, like a Java class whose methods
+are all `static`.
+
+### `TorrentFile` — the fields and the "20 bytes each" convention
+
+```cpp
+std::string announce;   // the tracker URL
+std::string name;       // the file/torrent name
+long long  pieceLength; // bytes per piece (Ubuntu: 262144)
+long long  length;      // total bytes of the file
+std::vector<uint8_t> pieces;    // ALL piece hashes, concatenated (20 bytes each)
+std::vector<uint8_t> infoHash;  // the 20-byte SHA-1 of the bencoded info dict
+```
+
+Technique: **a flat data-transfer object (DTO)**. The parser's whole job is to
+fill this in and hand it over; no logic lives here. Note `pieces` is stored as
+one big byte blob, not a `vector` of 20-byte arrays — the natural unit is
+*one* hash, fetched in Phase 6 as
+`pieces.begin() + i*20 … +20`. That "one flat buffer, index arithmetic to
+carve out records" style is very C++, and it keeps memory contiguous.
+
+### `TorrentParser` — function by function
+
+| Function | Technique | What it does |
+|---|---|---|
+| `parse(filepath)` (public, static) | **pipeline of small steps**; **defensive field extraction with `map::find` + type check** | the 6 steps: read → decode → verify dict → pull `announce` → pull `info` fields → compute hash |
+| `readFile(filepath)` (private, static) | **RAII file handle** + `istreambuf_iterator` slurp | open the file in binary, read *all* bytes into a `vector<uint8_t>`; throw if it can't open |
+| `findInfoValueStart(raw)` | **structural walk, not substring search**; **raw-bytes pointer arithmetic** | walk the top-level dict and return the index just past the `info` value's start |
+| `skipBencodeValue(raw, pos, depth)` (file-local `static`) | **recursive skip walker**; mirrors the decoder but *doesn't build* values; depth-capped | given a position, return the position *just past* the value that starts there (used to "leap over" every non-info value) |
+| `findDictEnd(raw, dictStart)` | **depth counter** (iterative, not recursive) | from the `info` dict's opening `d`, return the index of its *matching* closing `e` |
+| `computeInfoHash(raw)` | **pointer + length → digest**; reuses Phase 1's helpers | hash the exact byte range `[infoValueStart, dictEnd]` with `SHA1()` |
+| `checkedAppendDigit(...)` (file-local `static`) | **overflow guard** (same helper idea as Phase 1) | used by the three raw-walkers so a hostile `.torrent` can't overflow a length |
+
+Three of these deserve their own "why":
+
+- **`readFile` uses `std::ifstream` (a RAII handle).** The stream closes
+  itself when the function returns, even on the exception path — you can't
+  leak a file handle. (Java's `try-with-resources` / `Files.readAllBytes` is
+  the same idea.)
+- **Why a structural walk, not `find("4:info")`?** Because the byte pattern
+  `4:info` can appear *inside a string value* (a file could literally be named
+  `4:info`). Searching for a substring finds the wrong place; walking the
+  dict's grammar can only land on real keys. (Already teased above; this is
+  the code that proves it.)
+- **`findDictEnd` counts depth with a `while` loop instead of recursing** — a
+  nice contrast with `skipBencodeValue`, which *is* recursive. Same job
+  (find the matching `e`), two valid styles; the iterative one can't blow the
+  stack at all, so it's the extra-defensive choice for the raw scanner.
+
+### The extraction pattern (the quiet engineering of `parse()`)
+
+Every field is pulled the same defensive way:
+
+```cpp
+auto it = info.find("piece length");                 // look the key up
+if (it != info.end() && it->second.getType()         // present?
+        == BencodeValue::INTEGER) {                   // …and the right type?
+    torrent.pieceLength = it->second.asInteger();
+}
+```
+
+Technique: **the find-then-type-check idiom**. `map::find` returns an
+*iterator*; comparing it to `map::end()` is the safe "was it there?" test
+(calling `operator[]` would silently *insert* a default — a classic C++ trap).
+Then the `getType()` check means a malicious `.torrent` that puts a *string*
+where a number belongs is simply ignored (or, for `info` itself, rejected
+outright) instead of being blindly cast. This is "never trust the input"
+applied field-by-field.
+
+### The built-in types we rely on here
+
+| Built-in | What it gives us | Java equivalent |
+|---|---|---|
+| `std::ifstream` | a binary-mode file reader (RAII) | `InputStream` / `Files` |
+| `std::istreambuf_iterator<char>` | slurps a stream into a container (iterator-range read) | `Files.readAllBytes` |
+| `std::vector<uint8_t>` | the raw file bytes, and the `pieces` blob | `byte[]` |
+| `std::map<K,V>` (from Phase 1) | sorted, key-looked-up info dict | `TreeMap` |
+| iterators + `map::end()` | the find-then-check lookup pattern | `Map.get` + `containsKey` |
+| `static` members | a stateless utility class | all-`static` Java class |
+| OpenSSL `SHA1()` | the digest function over a raw byte range | `MessageDigest.getInstance("SHA-1")` |
+| `const uint8_t*` + `size_t` | pointer+length (a "span by hand") | `byte[]` + offset/length |
+
+### The algorithms/patterns this file is a textbook example of
+
+1. **Two-pass, two-view processing** — decode for *reading*, raw-walk for
+   *hashing*. The "don't re-encode" rule as an architecture.
+2. **Structural parsing over substring search** — walk the grammar to locate a
+   key; substring search is subtly wrong.
+3. **Recursive skip-walker** (`skipBencodeValue`) — a cursor function that
+   *jumps over* a value without materialising it; recursive because containers
+   nest, depth-capped for safety.
+4. **Iterative depth counting** (`findDictEnd`) — match a closing delimiter with
+   a counter; no recursion, so no stack risk.
+5. **Hash a byte range directly** (`SHA1(ptr, len, out)`) — compute a digest
+   over the original bytes, not a re-serialisation.
+6. **Find-then-type-check field extraction** — `map::find` + `getType()` for
+   every field; never blind-cast, never `operator[]` on untrusted input.
+7. **Fail-fast with position-rich errors** — every throw names the byte offset
+   where things went wrong.
+8. **Overflow prevention** (`checkedAppendDigit`) — applied to *every* digit
+   run the raw-walkers read, because a length is untrusted input too.
+9. **RAII for the file handle** — the `ifstream` releases the OS resource
+   automatically.
+10. **Reuse, don't re-implement** — the parser leans on Phase 1's
+    `BencodeDecoder`; the only new logic is the raw-byte walking that hashing
+    uniquely requires.
+
+### A one-paragraph mental model
+
+> `TorrentParser::parse` is a **six-step pipeline**: slurp the file (RAII) →
+> hand the bytes to Phase 1's decoder → sanity-check the root is a dict →
+> defensively copy out `announce` and the four `info` fields with
+> find-then-type-check → and then, on the *original* bytes, locate the `info`
+> dict's exact range (recursive skip-walker + depth counter) and `SHA1()` it.
+> The decoded tree is for reading; the raw bytes are for hashing — and never
+> the same step, never re-encoded.
+
 ## The real test output (Ubuntu 24.04 torrent)
 
 When `./build/peerflow` runs, Phase 2 prints this exact block:
