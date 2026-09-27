@@ -43,7 +43,12 @@ public:
     // Bind + listen on 127.0.0.1 (OS picks a free port) and spawn the thread.
     void start();
 
-    // Block until the single connection has been handled.
+    // Phase 4/5 handled ONE connection. Phase 6's download loop dials the
+    // seeder once PER piece, so tell the server how many visitors to expect.
+    // (It exits cleanly once that many have been served.)
+    void setMaxConnections(int n) { maxConnections_ = n; }
+
+    // Block until all expected connections have been handled.
     void join();
 
     uint16_t port() const { return port_; }
@@ -72,4 +77,7 @@ private:
     size_t pieceLength_ = 0;
     bool seeder_ = false;
     size_t destroyedByte_ = std::numeric_limits<size_t>::max();
+
+    // How many incoming connections to serve before the thread exits.
+    int maxConnections_ = 1;
 };

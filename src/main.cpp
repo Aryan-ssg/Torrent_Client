@@ -30,9 +30,11 @@
 #include "peer/PeerHandshake.hpp"
 #include "peer/PeerMessage.hpp"
 #include "peer/PieceDownloader.hpp"
+#include "piece/PieceManager.hpp"
 #include <iomanip>
 #include <algorithm>   // For std::min, std::equal
 #include <openssl/sha.h>  // For SHA1 (synthetic torrent piece hashes)
+#include <fstream>     // For std::ifstream / std::fstream (Phase 6 disk checks)
 
 // =============================================================================
 // TEST TRACKING VARIABLES
@@ -256,27 +258,28 @@ static void testInvalidInput() {
 //   - piece hashes and info hash computed here with the SAME OpenSSL SHA-1
 //     the rest of the project uses
 // -----------------------------------------------------------------------------
-static constexpr size_t kSynPieceLen = 16384;
-static constexpr size_t kSynLastLen = 5000;
-static constexpr size_t kSynLength = 2 * kSynPieceLen + kSynLastLen;  // 37768
+static constexpr size_t kSynPieceLen = 16384;   // standard 16 KiB piece
+static constexpr size_t kSynLastLen = 5000;     // a "short final piece"
 
-// The byte at absolute file position i of the synthetic content.
-static uint8_t syntheticByte(size_t i) {
-    size_t piece = i / kSynPieceLen;
-    size_t offset = i % kSynPieceLen;
+// The byte at absolute file position i of the synthetic content of a torrent
+// whose piece size is `pieceLen` (keep in sync: it must equal the formula
+// used to produce the piece hashes embedded in the synthetic torrent).
+static uint8_t syntheticByte(size_t i, size_t pieceLen) {
+    size_t piece = i / pieceLen;
+    size_t offset = i % pieceLen;
     return static_cast<uint8_t>((piece * 151 + offset * 7 + 3) & 0xFF);
 }
 
 // A slice [begin, begin+len) of the synthetic content.
-static std::vector<uint8_t> syntheticSlice(size_t begin, size_t len) {
+static std::vector<uint8_t> syntheticSlice(size_t begin, size_t len, size_t pieceLen) {
     std::vector<uint8_t> out(len);
-    for (size_t i = 0; i < len; i++) out[i] = syntheticByte(begin + i);
+    for (size_t i = 0; i < len; i++) out[i] = syntheticByte(begin + i, pieceLen);
     return out;
 }
 
 // The whole synthetic file.
-static std::vector<uint8_t> syntheticContent() {
-    return syntheticSlice(0, kSynLength);
+static std::vector<uint8_t> syntheticContent(size_t pieceLen, size_t totalLen) {
+    return syntheticSlice(0, totalLen, pieceLen);
 }
 
 // SHA-1 a byte vector -> 20 bytes (OpenSSL).
@@ -294,16 +297,16 @@ static std::string bencString(const std::string& s) {
 // Build the TorrentFile for our synthetic torrent. infoHash is SHA-1 of the
 // RAW bencoded info dict -- the exact "don't re-encode" rule from Phase 2,
 // applied here on the spot (keys in sorted order).
-static TorrentFile makeSyntheticTorrent() {
+static TorrentFile makeSyntheticTorrent(size_t pieceLen, size_t totalLen) {
     TorrentFile t;
     t.announce = "https://example.invalid/announce";
     t.name = "phase5-test.bin";
-    t.pieceLength = kSynPieceLen;
-    t.length = kSynLength;
+    t.pieceLength = pieceLen;
+    t.length = totalLen;
 
     // One SHA-1 per piece, concatenated (like TorrentFile.pieces).
-    for (size_t off = 0; off < kSynLength; off += kSynPieceLen) {
-        std::vector<uint8_t> piece = syntheticSlice(off, std::min(kSynPieceLen, kSynLength - off));
+    for (size_t off = 0; off < totalLen; off += pieceLen) {
+        std::vector<uint8_t> piece = syntheticSlice(off, std::min(pieceLen, totalLen - off), pieceLen);
         std::vector<uint8_t> h = sha1Of(piece);
         t.pieces.insert(t.pieces.end(), h.begin(), h.end());
     }
@@ -320,12 +323,17 @@ static TorrentFile makeSyntheticTorrent() {
     return t;
 }
 
+// Number of pieces in a torrent of `totalLen` with piece size `pieceLen`.
+static size_t pieceCountFor(size_t pieceLen, size_t totalLen) {
+    return (totalLen + pieceLen - 1) / pieceLen;
+}
+
 // Download one piece from a loopback FakePeer seeder and verify it end-to-end.
 // Also checks the assembled bytes MATCH the synthesized content (belt and
 // braces on top of the SHA-1 check).
-static void runPieceDownloadTest(size_t index) {
-    TorrentFile t = makeSyntheticTorrent();
-    std::vector<uint8_t> content = syntheticContent();
+static void runPieceDownloadTest(size_t index, size_t pieceLen, size_t totalLen) {
+    TorrentFile t = makeSyntheticTorrent(pieceLen, totalLen);
+    std::vector<uint8_t> content = syntheticContent(pieceLen, totalLen);
 
     FakePeer server(t.infoHash, "-PF0001-000000000000", content, t.pieceLength);
     server.start();
@@ -334,24 +342,25 @@ static void runPieceDownloadTest(size_t index) {
     fakePeer.ip = "127.0.0.1";
     fakePeer.port = server.port();
 
-    size_t pieceLen = std::min<size_t>(t.pieceLength, t.length - index * t.pieceLength);
+    size_t thisPieceLen = std::min(pieceLen, totalLen - index * pieceLen);
     std::vector<uint8_t> expectedHash(t.pieces.begin() + index * 20,
                                       t.pieces.begin() + index * 20 + 20);
 
     PieceDownloader::Result r = PieceDownloader::download(
         fakePeer, t.infoHash, generatePeerId(), static_cast<uint32_t>(index),
-        pieceLen, expectedHash, 4);
+        thisPieceLen, expectedHash, 4);
 
     server.join();
 
-    std::vector<uint8_t> want = syntheticSlice(index * kSynPieceLen, pieceLen);
-    if (r.ok && r.data.size() == pieceLen && r.data == want) {
-        std::cout << "PASS: downloaded piece " << (index + 1) << "/3 "
-                  << "(" << pieceLen << " bytes, SHA-1 + content verified)\n";
+    std::vector<uint8_t> want = syntheticSlice(index * pieceLen, thisPieceLen, pieceLen);
+    size_t total = pieceCountFor(pieceLen, totalLen);
+    if (r.ok && r.data.size() == thisPieceLen && r.data == want) {
+        std::cout << "PASS: downloaded piece " << (index + 1) << "/" << total
+                  << " (" << thisPieceLen << " bytes, SHA-1 + content verified)\n";
         passed++;
     } else {
-        std::cout << "FAIL: piece " << (index + 1) << "/3 download: "
-                  << r.error << "\n";
+        std::cout << "FAIL: piece " << (index + 1) << "/" << total
+                  << " download: " << r.error << "\n";
         failed++;
     }
 }
@@ -625,15 +634,16 @@ int main() {
     }
 
     // 2. Download all three pieces (two full 16 KiB, one short final piece).
-    runPieceDownloadTest(0);
-    runPieceDownloadTest(1);
-    runPieceDownloadTest(2);
+    runPieceDownloadTest(0, kSynPieceLen, 2 * kSynPieceLen + kSynLastLen);
+    runPieceDownloadTest(1, kSynPieceLen, 2 * kSynPieceLen + kSynLastLen);
+    runPieceDownloadTest(2, kSynPieceLen, 2 * kSynPieceLen + kSynLastLen);
 
     // 3. The "never trust the network" proof: a seeder that flips one byte
     //    in the data it serves. The SHA-1 check MUST reject the piece.
     {
-        TorrentFile t = makeSyntheticTorrent();
-        std::vector<uint8_t> content = syntheticContent();
+        const size_t totalLen = 2 * kSynPieceLen + kSynLastLen;
+        TorrentFile t = makeSyntheticTorrent(kSynPieceLen, totalLen);
+        std::vector<uint8_t> content = syntheticContent(kSynPieceLen, totalLen);
 
         FakePeer server(t.infoHash, "-PF0001-000000000000", content, t.pieceLength);
         server.destroyByte(12345);  // corrupt one byte inside piece 0
@@ -657,6 +667,256 @@ int main() {
             std::cout << "FAIL: corrupted piece should have been rejected, got: "
                       << (r.ok ? "ok=true" : r.error) << "\n";
             failed++;
+        }
+    }
+
+    // =============================================================================
+    // PHASE 6 TEST SCENARIO: PieceManager - own pieces, verify, write disk, resume
+    // =============================================================================
+    // The synthetic torrent is now a bit bigger: 8 pieces (7 full 16 KiB +
+    // one 5000-byte last piece). The FakePeer seeder is dialed once PER piece
+    // (Phase 6 connection model), and the PieceManager is the other end.
+    {
+        constexpr size_t k6LastLen = 5000;
+        const size_t k6Total = 7 * kSynPieceLen + k6LastLen;  // 8 pieces
+        std::cout << "\n=== Piece Manager + Disk Tests (Phase 6) ===\n\n";
+
+        // 1. Full download: fetch all 8 pieces, each over its own connection,
+        //    and confirm the bytes on disk equal the synthesized file byte for
+        //    byte. This exercises download + SHA-1 gate + offset writes.
+        {
+            const std::string outPath = "build/phase6-out.bin";
+            TorrentFile t = makeSyntheticTorrent(kSynPieceLen, k6Total);
+            std::vector<uint8_t> content = syntheticContent(kSynPieceLen, k6Total);
+
+            FakePeer server(t.infoHash, "-PF0001-000000000000", content, t.pieceLength);
+            server.setMaxConnections(static_cast<int>(pieceCountFor(kSynPieceLen, k6Total)));
+            server.start();   // spawns ONE thread, serves 8 visitors in a row
+
+            Peer fakePeer;
+            fakePeer.ip = "127.0.0.1";
+            fakePeer.port = server.port();
+
+            PieceManager manager(t, outPath);
+
+            while (!manager.complete()) {
+                size_t idx = manager.nextPieceToFetch();
+                size_t len = manager.pieceLength(idx);
+                std::vector<uint8_t> expectedHash(t.pieces.begin() + idx * 20,
+                                                  t.pieces.begin() + idx * 20 + 20);
+                PieceDownloader::Result r = PieceDownloader::download(
+                    fakePeer, t.infoHash, generatePeerId(), static_cast<uint32_t>(idx),
+                    len, expectedHash, 4);
+                if (!r.ok) {
+                    std::cout << "FAIL: full download piece " << idx << ": " << r.error << "\n";
+                    failed++;
+                    break;
+                }
+                bool stored = manager.storePiece(idx, r.data);
+                if (!stored) {
+                    std::cout << "FAIL: storePiece rejected verified piece " << idx << "\n";
+                    failed++;
+                    break;
+                }
+            }
+            server.join();
+
+            // Byte-for-byte compare of what the manager wrote.
+            std::ifstream saved(outPath, std::ios::binary);
+            std::vector<uint8_t> onDisk((std::istreambuf_iterator<char>(saved)),
+                                        std::istreambuf_iterator<char>());
+            if (manager.complete() && onDisk == content) {
+                std::cout << "PASS: full " << k6Total << "-byte download matches content "
+                          << "(" << manager.completedCount() << "/"
+                          << pieceCountFor(kSynPieceLen, k6Total) << " pieces)\n";
+                passed++;
+            } else {
+                std::cout << "FAIL: full download did not match (complete="
+                          << manager.complete() << " size=" << onDisk.size() << ")\n";
+                failed++;
+            }
+        }
+
+        // 2. Resume: download only the first 3 pieces, then build a FRESH
+        //    PieceManager over the same file and scanDisk(). It must realize
+        //    pieces 0-2 are already owned and only fetch the remaining 5.
+        {
+            const std::string outPath = "build/phase6-resume.bin";
+            TorrentFile t = makeSyntheticTorrent(kSynPieceLen, k6Total);
+            std::vector<uint8_t> content = syntheticContent(kSynPieceLen, k6Total);
+
+            bool ok = false;
+            try {
+                PieceManager first(t, outPath);
+                {
+                    FakePeer server(t.infoHash, "-PF0001-000000000000", content, t.pieceLength);
+                    server.setMaxConnections(3);
+                    server.start();
+                    Peer fakePeer;
+                    fakePeer.ip = "127.0.0.1";
+                    fakePeer.port = server.port();
+                    for (size_t idx = 0; idx < 3; idx++) {
+                        size_t len = first.pieceLength(idx);
+                        std::vector<uint8_t> expectedHash(t.pieces.begin() + idx * 20,
+                                                          t.pieces.begin() + idx * 20 + 20);
+                        PieceDownloader::Result r = PieceDownloader::download(
+                            fakePeer, t.infoHash, generatePeerId(),
+                            static_cast<uint32_t>(idx), len, expectedHash, 4);
+                        first.storePiece(idx, r.data);
+                    }
+                    server.join();
+                }
+
+                // Same file, brand-new manager: disk is the only memory here.
+                PieceManager resumed(t, outPath);
+                resumed.scanDisk();
+                size_t before = resumed.completedCount();
+
+                // Fetch exactly the pieces scanDisk said we still lack.
+                FakePeer server(t.infoHash, "-PF0001-000000000000", content, t.pieceLength);
+                server.setMaxConnections(static_cast<int>(pieceCountFor(kSynPieceLen, k6Total) - before));
+                server.start();
+                Peer fakePeer;
+                fakePeer.ip = "127.0.0.1";
+                fakePeer.port = server.port();
+                while (!resumed.complete()) {
+                    size_t idx = resumed.nextPieceToFetch();
+                    size_t len = resumed.pieceLength(idx);
+                    std::vector<uint8_t> expectedHash(t.pieces.begin() + idx * 20,
+                                                      t.pieces.begin() + idx * 20 + 20);
+                    PieceDownloader::Result r = PieceDownloader::download(
+                        fakePeer, t.infoHash, generatePeerId(), static_cast<uint32_t>(idx),
+                        len, expectedHash, 4);
+                    resumed.storePiece(idx, r.data);
+                }
+                server.join();
+
+                std::ifstream saved(outPath, std::ios::binary);
+                std::vector<uint8_t> onDisk((std::istreambuf_iterator<char>(saved)),
+                                            std::istreambuf_iterator<char>());
+                ok = (before == 3 && resumed.complete() && onDisk == content);
+            } catch (const std::exception& e) {
+                std::cout << "FAIL: resume test threw " << e.what() << "\n";
+            }
+            if (ok) {
+                std::cout << "PASS: resume - scanDisk() recovered 3/8 pieces, "
+                          << "fetched the rest, final bytes match\n";
+                passed++;
+            } else {
+                std::cout << "FAIL: resume test\n";
+                failed++;
+            }
+        }
+
+        // 3. Disk corruption: write all pieces, then flip one byte straight in
+        //    the FILE (bypassing PieceManager entirely - the disk lied). A new
+        //    manager + scanDisk() must detect it, NOT trust the bad piece, and
+        //    refetch it; final bytes still equal the synthesized content.
+        {
+            const std::string outPath = "build/phase6-corrupt.bin";
+            TorrentFile t = makeSyntheticTorrent(kSynPieceLen, k6Total);
+            std::vector<uint8_t> content = syntheticContent(kSynPieceLen, k6Total);
+
+            bool healed = false;
+            try {
+                // Rewrite the file freshly with all 8 pieces.
+                PieceManager writer(t, outPath);
+                {
+                    FakePeer server(t.infoHash, "-PF0001-000000000000", content, t.pieceLength);
+                    server.setMaxConnections(static_cast<int>(pieceCountFor(kSynPieceLen, k6Total)));
+                    server.start();
+                    Peer fakePeer;
+                    fakePeer.ip = "127.0.0.1";
+                    fakePeer.port = server.port();
+                    while (!writer.complete()) {
+                        size_t idx = writer.nextPieceToFetch();
+                        size_t len = writer.pieceLength(idx);
+                        std::vector<uint8_t> expectedHash(t.pieces.begin() + idx * 20,
+                                                          t.pieces.begin() + idx * 20 + 20);
+                        PieceDownloader::Result r = PieceDownloader::download(
+                            fakePeer, t.infoHash, generatePeerId(), static_cast<uint32_t>(idx),
+                            len, expectedHash, 4);
+                        writer.storePiece(idx, r.data);
+                    }
+                    server.join();
+                }
+
+                // Corrupt one byte INSIDE a full piece, directly in the file.
+                {
+                    std::fstream f(outPath, std::ios::in | std::ios::out | std::ios::binary);
+                    char c;
+                    f.seekg(1000);
+                    f.read(&c, 1);
+                    c = static_cast<char>(c ^ 0xFF);
+                    f.seekp(1000);
+                    f.write(&c, 1);
+                }
+
+                // A fresh manager must NOT believe the disk here.
+                PieceManager manager2(t, outPath);
+                manager2.scanDisk();
+                size_t ownedBefore = manager2.completedCount();
+
+                FakePeer server(t.infoHash, "-PF0001-000000000000", content, t.pieceLength);
+                server.setMaxConnections(static_cast<int>(pieceCountFor(kSynPieceLen, k6Total) - ownedBefore));
+                server.start();
+                Peer fakePeer;
+                fakePeer.ip = "127.0.0.1";
+                fakePeer.port = server.port();
+                while (!manager2.complete()) {
+                    size_t idx = manager2.nextPieceToFetch();
+                    size_t len = manager2.pieceLength(idx);
+                    std::vector<uint8_t> expectedHash(t.pieces.begin() + idx * 20,
+                                                      t.pieces.begin() + idx * 20 + 20);
+                    PieceDownloader::Result r = PieceDownloader::download(
+                        fakePeer, t.infoHash, generatePeerId(), static_cast<uint32_t>(idx),
+                        len, expectedHash, 4);
+                    manager2.storePiece(idx, r.data);
+                }
+                server.join();
+
+                std::ifstream saved(outPath, std::ios::binary);
+                std::vector<uint8_t> onDisk((std::istreambuf_iterator<char>(saved)),
+                                            std::istreambuf_iterator<char>());
+                healed = (ownedBefore == 7 && onDisk == content);
+            } catch (const std::exception& e) {
+                std::cout << "FAIL: disk-corruption test threw " << e.what() << "\n";
+            }
+            if (healed) {
+                std::cout << "PASS: disk corruption - scanDisk() caught 1 bad piece, "
+                          << "refetched it, final bytes match\n";
+                passed++;
+            } else {
+                std::cout << "FAIL: disk corruption test\n";
+                failed++;
+            }
+        }
+
+        // 4. storePiece itself must reject a wrong piece (good SHA-1 of a
+        //    DIFFERENT piece, wrong size, and outright garbage).
+        {
+            const std::string outPath = "build/phase6-reject.bin";
+            TorrentFile t = makeSyntheticTorrent(kSynPieceLen, k6Total);
+            PieceManager manager(t, outPath);
+
+            bool rejectedAll = false;
+            try {
+                std::vector<uint8_t> second = syntheticSlice(kSynPieceLen, kSynPieceLen, kSynPieceLen);
+                std::vector<uint8_t> truncated = syntheticSlice(0, 100, kSynPieceLen);
+                std::vector<uint8_t> junk(16384, 0xEE);
+                rejectedAll = !manager.storePiece(0, second) &&
+                              !manager.storePiece(0, truncated) &&
+                              !manager.storePiece(0, junk);
+            } catch (const std::exception& e) {
+                std::cout << "FAIL: storePiece rejection threw " << e.what() << "\n";
+            }
+            if (rejectedAll) {
+                std::cout << "PASS: storePiece rejects wrong piece / wrong size / garbage\n";
+                passed++;
+            } else {
+                std::cout << "FAIL: storePiece accepted something it should reject\n";
+                failed++;
+            }
         }
     }
 

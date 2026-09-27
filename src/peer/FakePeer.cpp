@@ -134,13 +134,15 @@ void FakePeer::start() {
 }
 
 void FakePeer::acceptLoop() {
-    // We only need one connection for the test; when it's done we exit.
-    struct sockaddr_in clientAddr {};
-    socklen_t clen = sizeof(clientAddr);
-    int clientFd = ::accept(listenFd_,
-                            reinterpret_cast<struct sockaddr*>(&clientAddr),
-                            &clen);
-    if (clientFd >= 0) {
+    // Serve up to maxConnections_ visitors (Phase 4/5: one; Phase 6: one
+    // per piece). We exit after the last one so join() can return.
+    for (int served = 0; served < maxConnections_; served++) {
+        struct sockaddr_in clientAddr {};
+        socklen_t clen = sizeof(clientAddr);
+        int clientFd = ::accept(listenFd_,
+                                reinterpret_cast<struct sockaddr*>(&clientAddr),
+                                &clen);
+        if (clientFd < 0) return;   // listen socket closed (destructor)
         handleConnection(clientFd);
         ::close(clientFd);
     }

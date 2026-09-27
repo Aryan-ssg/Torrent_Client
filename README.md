@@ -3,8 +3,8 @@
 PeerFlow is a BitTorrent client built **from scratch in C++17**, one layer at a
 time, with every line written and explained — no magic, no hidden frameworks.
 
-Current milestone: **25/25 tests passing** through Phase 5 (downloading a
-SHA-1-verified piece).
+Current milestone: **29/29 tests passing** through Phase 6 (owning pieces and
+writing a verified file to disk, with resume support).
 
 > 🍕 The whole project in one breath: read the `.torrent` recipe card, ask a
 > matchmaker (tracker) who else is cooking, shake hands with neighbours
@@ -20,7 +20,8 @@ SHA-1-verified piece).
 | 3 | Tracker announce, get peers | ✅ — real HTTPS tracker: `Peers found: 50` |
 | 4 | Peer handshake | ✅ — verified on loopback; this network blocks peer ports |
 | 5 | Messages + downloading a verified piece | ✅ — loopback seeder: request 16 KiB blocks, assemble, SHA-1 verify |
-| 6–9 | Piece manager + disk, concurrency, seeding, extras | ⬜ |
+| 6 | Piece manager + disk + resume | ✅ — fetch all pieces, verify + write at correct offset, `scanDisk()` resume |
+| 7–9 | Concurrency, seeding, extras | ⬜ |
 
 ## Start here
 
@@ -35,7 +36,7 @@ SHA-1-verified piece).
 ```bash
 cmake -B build
 cmake --build build
-./build/peerflow          # runs all 25 tests, prints PASS/FAIL + results
+./build/peerflow          # runs all 29 tests, prints PASS/FAIL + results
 ```
 
 Requires: a C++17 compiler, CMake ≥ 3.14, OpenSSL. (Similar to `mvn package`
@@ -52,7 +53,8 @@ Torrent_Client/
 │   ├── torrent/             #   Phase 2  .torrent parser
 │   ├── tracker/             #   Phase 3  announce + peer list
 │   ├── net/                 #   shared  TcpSocket + exceptions
-│   └── peer/                #   Phases 4–5 handshake + messages + FakePeer
+│   ├── peer/                #   Phases 4–5 handshake + messages + FakePeer
+│   └── piece/               #   Phase 6  PieceManager (own + write pieces)
 ├── src/                     # implementations (the "real code")
 └── test/                    # the Ubuntu 24.04 .torrent used for testing
 ```
@@ -69,8 +71,13 @@ Torrent_Client/
   info-hash verification — proven against a loopback `FakePeer`
 - ✅ Peer wire messages (length-prefixed) + a full **piece download**: request
   16 KiB blocks, assemble them, SHA-1 the result against the torrent's piece
-  hashes — verified on a loopback seeder, including the shorter final piece
-  and the rejection of a deliberately corrupted piece
+hashes — verified on a loopback seeder, including the shorter final piece
+   and the rejection of a deliberately corrupted piece
+- ✅ `PieceManager`: download **every** piece (one TCP connection each, like a
+  real client), verify SHA-1 at the last gate, write at the exact file offset;
+  **resume** re-verifies the file on disk (`scanDisk()`) and only refetches
+  the pieces that failed the hash — including detecting one deliberately
+  corrupted byte on disk
 - 🧱 `TcpSocket` reusable network primitive shared by all phases
 
 ## Known environment notes
@@ -78,13 +85,12 @@ Torrent_Client/
 - `torrent.ubuntu.com` restricts by IP range and rejects this machine.
 - This network's firewall allows only a few outbound ports (80/443), so
   arbitrary peer ports (6881, 51413, …) are unreachable — which is why Phases
-  4–5 tests run against a local fake peer/seeder on `127.0.0.1`.
+  4–6 tests run against a local fake peer/seeder on `127.0.0.1`.
 
 ## Roadmap
 
-Phase 6 — piece manager + disk: download the rest of the pieces, write the
-file, resume support. Then: concurrency → seeding → extras (magnet, UDP
-trackers, DHT).
+Phase 7 — concurrency: connect to several peers and download many pieces at
+once. Then: seeding → extras (magnet, UDP trackers, DHT).
 
 ## Learning resources
 

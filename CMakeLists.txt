@@ -59,6 +59,7 @@ add_executable(peerflow
     src/peer/PeerMessage.cpp
     src/peer/PieceDownloader.cpp
     src/peer/FakePeer.cpp
+    src/piece/PieceManager.cpp
 )
 
 target_include_directories(peerflow PRIVATE include)

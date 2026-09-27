@@ -80,6 +80,9 @@ Every phase applies these in code:
 | `include/peer/PeerMessage.hpp` | the length-prefixed wire format + the message ids + `sendMessage`/`readMessage` |
 | `src/peer/PeerMessage.cpp` | framing helpers, big-endian request/piece payload build/parse |
 | `include/peer/PieceDownloader.hpp` / `src/peer/PieceDownloader.cpp` | download ONE piece: handshake → interested → unchoke → request blocks → SHA-1 verify |
+| **Phase 6 — piece manager + disk** | |
+| `include/piece/PieceManager.hpp` / `src/piece/PieceManager.cpp` | preallocate the file, ownership bitmap, `storePiece()` (SHA-1 gate + offset write), `nextPieceToFetch()`, `scanDisk()` resume |
+| `include/piece/FileException.hpp` | the "disk layer failed" exception (open/truncate/write errors) |
 
 ## How the tests are organized
 
@@ -100,6 +103,11 @@ Every phase applies these in code:
                                     download 3 pieces from a loopback seeder:
                                     2 full 16 KiB + the shorter final piece;
                                     corrupted data rejected by SHA-1)
+=== Piece Manager + Disk Tests ===  (download an 8-piece synthetic file over
+                                    one connection per piece; byte-compare the
+                                    result; resume via scanDisk() after 3/8;
+                                    one corrupted byte on disk detected and
+                                    refetched; storePiece rejects garbage)
 === Results ===                     Passed: N / Failed: M
 ```
 
@@ -108,7 +116,7 @@ Every phase applies these in code:
 ```bash
 cmake -B build          # configure
 cmake --build build     # compile
-./build/peerflow        # run all 20 tests
+./build/peerflow        # run all 29 tests
 ```
 
 A completely clean rebuild (if things ever feel stale):
@@ -117,7 +125,7 @@ A completely clean rebuild (if things ever feel stale):
 rm -rf build && cmake -B build && cmake --build build && ./build/peerflow
 ```
 
-## Current status (Phases 0–5)
+## Current status (Phases 0–6)
 
 ```
 Phase 0  Setup & tools         ✅ done
@@ -126,20 +134,24 @@ Phase 2  Torrent parser        ✅ done  (info hash verified)
 Phase 3  Tracker announce      ✅ done  (Peers found: 50)
 Phase 4  Peer handshake        ✅ done  (loopback proof; real peers blocked by firewall here)
 Phase 5  Messages + pieces     ✅ done  (loopback seeder: 3 pieces downloaded & SHA-1 verified,
-                                        corrupted piece rejected; 25 tests total)
-Phase 6  Piece manager + disk  ⬜ next: download all pieces, write the file, resume
+                                        corrupted piece rejected)
+Phase 6  Piece manager + disk  ✅ done  (8-piece synthetic file downloaded to disk and
+                                        byte-verified; resume + disk-corruption recovery;
+                                        storePiece gate; 29 tests total)
 Phase 7  Many peers            ⬜ concurrency
 Phase 8  Upload / seeding      ⬜ listening + tit-for-tat
 Phase 9  Extras                ⬜ magnet links, UDP trackers, DHT
 ```
 
-## The road ahead (Phase 6 in one breath)
+## The road ahead (Phase 7 in one breath)
 
-Phase 5 proved we can fetch **one** honest piece. Phase 6 turns that into a
-**piece manager**: track which pieces we own, fetch the remaining ones, write
-the finished file to disk, and (eventually) resume an interrupted download by
-remembering which pieces are already verified. The loopback seeder grows up
-into a way to download a whole synthetic file end-to-end.
+Phase 6 downloads pieces **one at a time**: the manager asks for the next
+missing piece, waits for it, writes it, and repeats — one network round trip
+per block. Phase 7 makes it fast: many TCP connections to many peers at once,
+each pulling different blocks of the same piece, coordinated through the
+manager. The last big missing piece before Phase 7 is a **real server side**
+(Phase 8: listening + seeding), so for now the loopback `FakePeer` seeder
+keeps playing that part.
 
 ---
 
