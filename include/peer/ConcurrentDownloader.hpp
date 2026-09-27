@@ -18,10 +18,13 @@
 //   - if a download fails, the piece is RELEASED back to PENDING so another
 //     worker can retry it
 //
-// The peer for step 3 is picked from the swarm that Phase 3's tracker gave
-// us (worker i -> peers[i % size]). Because each worker talks to its own peer
-// over its own TCP connection, the fake seeders in the test run truly in
-// parallel - which is exactly what the Phase 7 timing test measures.
+// The peer for step 3 is picked as peers[pieceIndex % peers.size()], so the
+// swarm is load-balanced by construction: piece 0 -> peer 0, piece 1 -> peer
+// 1, ... (Real clients pick a peer per piece, roughly this way, so no single
+// peer ends up carrying all the work if the claim races hand one worker most
+// of the pieces.) Each peer is dialed over its own TCP connection, so the
+// fake seeders in the test run truly in parallel - which is exactly what the
+// Phase 7 timing test measures.
 //
 // (Real clients take parallelism one level further: for big pieces they split
 // ONE piece into blocks and fetch different blocks from different peers. Our

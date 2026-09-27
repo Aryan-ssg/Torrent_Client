@@ -328,4 +328,4 @@ nothing but an environment that permits peer ports.
 
 ---
 
-*Next: [07 — Reference](07-reference.md)*
+*Next: [07 — Phase 5: Peer Messages and the Piece Download](07-phase5-messages.md)*

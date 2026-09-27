@@ -1,4 +1,4 @@
-# 07 — Reference: Reusable Blocks, the File Map, and Testing
+# 10 — Reference: Reusable Blocks, the File Map, and Testing
 
 This final chapter is a shelf of everything reusable plus the "where is
 everything" map. Use it as a cheat sheet.
@@ -47,7 +47,7 @@ Every phase applies these in code:
 5. **Graceful failure.** `perform()` variants return a result with an error
    string rather than crashing the whole client.
 
-## The complete file map (Phases 0–5)
+## The complete file map (Phases 0–7)
 
 | File | Purpose (plain-English) |
 |---|---|
@@ -55,7 +55,7 @@ Every phase applies these in code:
 | `CMakeLists.txt` | build config: what to compile, what libraries to link (like `pom.xml`) |
 | `README.md` | the short front-door description |
 | **Tests** | |
-| `src/main.cpp` | the test runner: 20 checks that print PASS/FAIL |
+| `src/main.cpp` | the test runner: 34 checks that print PASS/FAIL |
 | **Phase 1 — bencode** | |
 | `include/bencode/BencodeValue.hpp` | the tagged-union value (label + one of four shapes) |
 | `include/bencode/BencodeDecoder.hpp` | the parser: parse/dispatch methods, static `decode()` |

@@ -25,7 +25,10 @@ reference while browsing the code.
 | [04 – Phase 2: Torrent parser](04-phase2-parser.md) | Reading a `.torrent` file and computing its info hash | announce URL, pieces, info hash, why we must not re-encode |
 | [05 – Phase 3: Tracker](05-phase3-tracker.md) | Asking a matchmaker for peers over the internet | HTTP, TCP, DNS, TLS/HTTPS, compact peers, endianness |
 | [06 – Phase 4: Peer handshake](06-phase4-handshake.md) | The first 68 bytes two clients exchange | the handshake layout, TCP streams, timeouts, testing on your own computer |
-| [07 – Reference](07-reference.md) | Everything reusable + the full file map + the test suite | our `TcpSocket`, exceptions, "never trust the network", all 34 tests |
+| [07 – Phase 5: Messages + pieces](07-phase5-messages.md) | The length-prefixed wire protocol and downloading one verified piece | keep-alives, message ids, REQUEST/PIECE payloads, the SHA-1 gate |
+| [08 – Phase 6: Pieces to disk](08-phase6-pieces.md) | Owning every piece, writing a file, resume | the ownership map, `storePiece()`, `scanDisk()`, "never trust the disk either" |
+| [09 – Phase 7: Parallel downloads](09-phase7-concurrency.md) | Many workers, many peers, real speed | threads, claim/release, atomic abort, load-balancing peers, the speedup test |
+| [10 – Reference](10-reference.md) | Everything reusable + the full file map + the test suite | our `TcpSocket`, exceptions, "never trust the network", all 34 tests |
 
 ## Where the actual code lives
 
