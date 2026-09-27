@@ -279,6 +279,128 @@ to finish before asserting `accepted() == 1`. This is our first taste of
 concurrency — and a seed for Phase 7, where many peers get handled in parallel
 and threads become the engine of download speed.
 
+## The code, piece by piece (classes, functions, algorithms, techniques)
+
+The same tour as Phases 1–3.
+
+### The user-defined types
+
+| Type | Header | Its one job | Java cousin |
+|---|---|---|---|
+| `PeerHandshake` (**class**) | `include/peer/PeerHandshake.hpp` + `.cpp` | build/send/verify the 68 bytes; all-`static` | a static utility class |
+| `FakePeer` (**class**) | `include/peer/FakePeer.hpp` + `.cpp` | the **server side** on loopback (a test double) | a test stub / mock server |
+| `PeerHandshake::Result` (**struct**) | same header | `{ok, peerId, error}` — a verdict, not an exception | a result record |
+| `TcpSocket` (reused) | `include/net/TcpSocket.hpp` | the socket primitive Phase 3 extracted | a `Socket` |
+| `Peer` (reused) | `include/tracker/Peer.hpp` | the address we're dialling | a value object |
+
+`FakePeer` is worth calling out as a category: it's a **test double (a
+stand-in for a real system)**. It is the *only* class in the project that
+exists purely so the real one can be proven correct — and, as Phase 4's
+comments note, it doubles as a preview of the server socket we build for real
+in Phase 8.
+
+### `PeerHandshake` — function by function
+
+| Function | Technique | What it does |
+|---|---|---|
+| `buildHandshake(infoHash, peerId)` (file-local `static`) | **field concatenation in spec order** | appends 1 + 19 + 8 + 20 + 20 bytes = exactly 68 |
+| `exchange(socket, infoHash, peerId)` | **validate-then-extract**; `std::equal` for byte comparison | sends our 68, `recvExact`s 68 back, runs 4 checks, returns `Result` |
+| `perform(peer, infoHash, peerId, timeout)` | **exception → verdict conversion** (`try`/`catch` → `Result`) | `connect` + `exchange`, catching every network error into `result.error` |
+
+Two of these are the phase's real lessons:
+
+- **`exchange` checks in a fixed order and bails early.** Byte 0 must be `19`;
+  bytes 1–19 must be the protocol name; bytes 28–47 must equal our info hash
+  (`std::equal(infoHash.begin(), infoHash.end(), reply + 28)` — a *byte*
+  comparison over a raw buffer, not string comparison); only then is the
+  peer's 20-byte `peer_id` extracted from bytes 48–67. Technique:
+  **fail-fast field validation**.
+- **`perform` never throws outward.** Everything (`connect` errors, timeouts,
+  mid-read closes, wrong bytes) is wrapped in `try/catch` and returned as
+  `{ok=false, error="…"}`. This is deliberate and worth repeating from Phase 3:
+  *a bad peer is an annoyance, not a catastrophe* — the caller wants a verdict
+  on one peer so it can move to the next, not an exception that unwinds the
+  whole swarm loop. (In Java terms: return-value-for-facts,
+  exception-for-programming-errors — the roles are consciously inverted here.)
+
+### `FakePeer` — the server-side mirror
+
+This is the same protocol played from the other chair, written directly
+against POSIX sockets (no `TcpSocket`, because a real seeder in Phase 8 will
+use raw accepted descriptors):
+
+| Function | Technique | What it does |
+|---|---|---|
+| `start()` | the **server socket trinity** `socket`→`bind`→`listen`, plus `getsockname` | binds to `127.0.0.1:0` (OS picks the port), `SO_REUSEADDR`, spawns the accept thread |
+| `acceptLoop()` (on a `std::thread`) | **serve-N-then-exit loop** | `accept()` up to `maxConnections_` times, handling each in turn |
+| `handleConnection(fd)` | **symmetric validation** | `readExact` 68 bytes, check length byte + protocol string + info hash, then reply with our own 68 |
+| `handleSeeder(fd)` (Phase 5 mode) | a small **message loop** | send BITFIELD, answer INTERESTED with UNCHOKE, serve REQUESTs with PIECEs |
+| `shutdown()` / `~FakePeer()` | RAII + explicit teardown | closes the listen socket so a blocked `accept()` fails and `join()` can return |
+| `setMaxConnections(n)`, `destroyByte(i)`, `servedCount()` | **test seams** | knobs the tests use to assert behaviour |
+
+Techniques on display: the **server-side trinity** (vs. the client's single
+`connect`), **port 0 + `getsockname`** ("OS, pick a free port" — same trick as
+`ServerSocket(0)`), `htonl(INADDR_LOOPBACK)` (the server side of Phase 3's
+endianness lesson), **accept-on-a-thread** (so the main thread can connect
+while the server waits), and a **serve-exactly-N** loop (so `join()` becomes
+a synchronisation point and tests can assert connection *counts*).
+
+The file-local `readExact` / `sendAll` / `sendFrame` / `readFrame` helpers in
+`FakePeer.cpp` are the **server-side twins** of `TcpSocket`'s methods — the
+same "assume partial I/O" discipline, written once more against a raw `int fd`.
+That's a small, honest duplication: the client wraps a connected socket, the
+server works with accepted descriptors, and at Phase 8 that asymmetry is worth
+resolving properly.
+
+### The built-in types we rely on here
+
+| Built-in | What it gives us | Java equivalent |
+|---|---|---|
+| `std::equal` on raw pointers | byte-exact comparison of the 20-byte hash | `Arrays.equals` |
+| `std::string::append(n, ch)` | append N copies of a byte (the 8 reserved zeros) | `StringBuilder.append` in a loop |
+| `std::string(ptr, len)` | build a string from raw bytes | `new String(bytes, off, len)` |
+| `std::thread` | run the accept loop off the main thread | `new Thread(...)` / `ExecutorService` |
+| `std::move` | hand a non-copyable object back by value | (Java has no move; you just pass the reference) |
+| `htonl` / `ntohs` / `getsockname` | network-byte-order + read back the bound port | `InetAddress` + `ServerSocket.getLocalPort()` |
+| `SO_REUSEADDR` | rebind over TIME_WAIT | `setReuseAddress(true)` |
+| `accept()` | block for one incoming connection | `ServerSocket.accept()` |
+| fixed `char[8192]`/`unsigned char[68]` buffers | stack scratch space | `byte[] buf` |
+
+### The algorithms/patterns this phase is a textbook example of
+
+1. **Byte-layout construction** — building a fixed-size protocol frame by
+   concatenating fields in spec order; the hex dump *is* the spec.
+2. **Validate-then-extract** — check the invariants, bail early with a reason,
+   and only pull fields out once the frame is trusted.
+3. **Byte-exact comparison** — `std::equal` over raw bytes (no string
+   semantics, tolerant of any byte values).
+4. **Exception → verdict conversion** — `perform()` catches everything and
+   returns `{ok, error}`; a bad peer costs one report, never a crash.
+5. **The exactly-N read** — `recvExact`/`readExact` loop until precisely 68
+   bytes arrive (the TCP-stream lesson, now the phase's core skill).
+6. **Timeouts everywhere** — the connect timeout turns a black-holed peer into
+   a fast, reportable failure.
+7. **The server trinity + accept loop** — `socket`/`bind`/`listen`/`accept` on
+   a separate thread, the exact mirror of the client's `connect`.
+8. **Test doubles on loopback** — build a faithful fake peer so the real code
+   can be proven correct without the internet.
+9. **Serve-N-then-exit** — a bounded accept loop that turns `join()` into a
+   test synchronisation point (and lets tests assert connection counts).
+10. **RAII teardown + explicit `shutdown()`** — resources released by
+    destructors, plus a way to unblock a parked `accept()`.
+
+### A one-paragraph mental model
+
+> Phase 4 is **one class that builds a 68-byte frame, sends it, reads exactly
+> 68 bytes back, and validates four fields in order** — returning a verdict
+> struct instead of throwing, so a hostile swarm is merely an inconvenience.
+> Its mirror image, `FakePeer`, is the *server* half of the same protocol:
+> the `socket`→`bind`→`listen`→`accept` trinity on its own thread, reading
+> and checking the same 68 bytes and replying with its own. The techniques
+> underneath: byte-layout construction, validate-then-extract, byte-exact
+> comparison, exception-to-verdict conversion, the exactly-N read, socket
+> timeouts, and a test double that makes the whole thing deterministic.
+
 ## The real test output
 
 ```

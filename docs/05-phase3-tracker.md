@@ -472,6 +472,205 @@ struct Peer {
 };
 ```
 
+## The code, piece by piece (classes, functions, algorithms, techniques)
+
+The same tour as Phases 1–2: every class and function, every built-in we lean
+on, and the named techniques this phase is an example of.
+
+### The user-defined types
+
+| Type | Header | Its one job | Java cousin |
+|---|---|---|---|
+| `TrackerRequest` (**struct**) | `include/tracker/TrackerRequest.hpp` | the announce parameters + `buildAnnounceUrl()` | a DTO with a `toUrl()` method |
+| `TrackerResponse` (**struct**) | `include/tracker/TrackerResponse.hpp` | the tracker's parsed answer | a response DTO / record |
+| `Peer` (**struct**) | `include/tracker/Peer.hpp` | one address pair: `ip` + `port` | a tiny value object |
+| `HttpTracker` (**class**) | `include/tracker/HttpTracker.hpp` + `.cpp` | speak HTTP(S) to a tracker, all-`static` | a static service class |
+| `TcpSocket` (**class**) | `include/net/TcpSocket.hpp` + `.cpp` | the reusable socket primitive | a non-cloneable `Socket` |
+| `Url` (file-local `struct`) | `src/tracker/HttpTracker.cpp` | the four pieces of a parsed URL | a parsed-URI record |
+| `HttpResponse` (file-local `struct`) | `src/tracker/HttpTracker.cpp` | status + header map + body | an HTTP response object |
+| `Connection` (file-local `struct`) | `src/tracker/HttpTracker.cpp` | a `TcpSocket` + optional `SSL*` | a session wrapper |
+| `NetException` | `include/net/NetException.hpp` | "the network failed" | a custom `IOException` |
+
+Notice the pattern: **the three data carriers are `struct`s (public fields, no
+behaviour), while the two workers (`HttpTracker`, `TcpSocket`) are `class`es
+with private state.** And four of the nine types live *inside*
+`HttpTracker.cpp` — implementation detail, deliberately not in any header.
+
+### `TrackerRequest` — DTO + a method that does string surgery
+
+- **Fields**: `announceUrl`, `infoHash` (20 bytes), `peerId` (20 bytes),
+  `port`, `uploaded`, `downloaded`, `left`, `compact`, `event`.
+- **`buildAnnounceUrl()` (const member function)** — glue `?`/`&` + every
+  parameter. The subtle bit is the *conditional separator*:
+
+```cpp
+bool alreadyHasQuery = (announceUrl.find('?') != std::string::npos);
+url += alreadyHasQuery ? '&' : '?';
+```
+
+Technique: **query-string assembly with separator detection** — many tracker
+URLs already carry a passkey (`…/announce?passkey=abc`); blindly adding `?`
+would silently swallow our parameters into that value.
+- `const` on the method means it *reads* the struct without modifying it.
+
+### The free functions `generatePeerId()` and `urlEncode()`
+
+- **`generatePeerId()`** — builds the 20-byte ID: the fixed prefix `"-PF0001-"`
+  (8 bytes: `-` + client code `PF` + version `0001` + `-`), then pads to 20 with
+  random characters from a 36-char alphabet. Technique: **`std::random_device`**
+  (OS entropy, like Java's `SecureRandom`) plus modulo indexing into an
+  alphabet. The randomness matters: the tracker uses `peer_id` to tell us apart
+  from other clients.
+- **`urlEncode()`** — percent-encoding, one `%XX` per unsafe byte. Two
+  overloads (`vector<uint8_t>` and `string`; the string one converts and
+  delegates — **overloading**). It splits on `isUrlSafe()`: RFC 3986's
+  *unreserved* set `A-Za-z0-9-._~` passes through, everything else becomes
+  `hex[b >> 4]` + `hex[b & 0x0F]` (high nibble, low nibble). This is *why* the
+  binary info hash can travel in a URL at all.
+
+### `TcpSocket` — the reusable primitive (the DRY lesson)
+
+The class exists because tracker code and peer code need *identical*
+socket behaviour. Its design is the interesting part:
+
+- **Deleted copy, allowed move** — `TcpSocket(const TcpSocket&) = delete;`
+  A socket owns an OS file descriptor; two objects closing one fd is a bug.
+  Moves are implemented by *stealing* `fd_` and setting the source to `-1`
+  ("empty"). This is the **Rule of Five / resource ownership** pattern (here
+  only the destructor + move ops are user-written).
+- **Destructor = cleanup** — `~TcpSocket() { close(); }` (RAII: the
+  descriptor is released no matter how the function exits).
+- **`connect(host, port, timeout)`** — the multi-address DNS loop:
+
+```cpp
+for (struct addrinfo* ai = results; ai; ai = ai->ai_next) {
+    int fd = ::socket(...);                       // try this address
+    setsockopt(fd, ..., SO_RCVTIMEO/SO_SNDTIMEO);  // arm the timeout
+    if (::connect(fd, ...) == 0) { fd_ = fd; break; }  // keep the winner
+    ::close(fd);                                    // else close and retry
+}
+```
+
+Techniques: **`getaddrinfo` resolution** (one call that may return several
+IPv4/IPv6 addresses — the C equivalent of Java's
+`InetAddress.getAllByName()`), the **try-each-address loop** (happiness
+pathways), **socket options for I/O timeouts** (`SO_RCVTIMEO`/`SO_SNDTIMEO`
+turn a black-hole peer into an error instead of a hang), and `freeaddrinfo`
+to avoid leaking the DNS list.
+- **`sendAll()` / `recvExact()` / `recvSome()`** — the two-part read/write
+  discipline the whole project rests on. `sendAll` loops (send may take
+  *part* of your buffer; `EINTR` is retried). `recvSome` is one attempt
+  (returns >0 bytes, `0` = clean EOF, `-1` = error/timeout) and `recvExact`
+  loops on top of it until it has *exactly* `len` bytes — the TCP-stream fix.
+
+### `HttpTracker.cpp` — the file-local machinery
+
+| Function | Technique | What it does |
+|---|---|---|
+| `parseUrl(raw)` | manual tokenising; `rfind` + default ports | split `https://host:port/path?q` into `Url{tls, host, port, pathAndQuery}`; default 443/80 |
+| `resolveLocation(base, location)` | **relative-URL resolution** | turn a redirect's `Location` (absolute or `/path`) into a full URL |
+| `sendAll(c, data)` / `recvSome(c, …)` | **polymorphic wrapper** over "raw socket *or* TLS" | if `c.ssl` use `SSL_write`/`SSL_read`, else the plain socket — one API, two transports |
+| `readAll(c)` | read-until-EOF loop | slurp the whole reply (we send `Connection: close`) |
+| `decodeChunked(body)` | **stateful wire-format un-chunker** | undo HTTP chunked encoding: `<hex-size>\r\n<bytes>` repeatedly, stop at size 0 |
+| `performRequest(c, text)` | **header/body splitting** + `istringstream` parsing | send, read, split at `\r\n\r\n`, parse the status line (`atoi`) and `Name: value` headers (lowercased keys), then de-chunk if needed |
+| `connectTo(u, timeout)` | factory returning by value (moved out) | wrap `TcpSocket::connect` into a `Connection` |
+| `sslContext()` | **function-local `static` (Meyers singleton)** | one shared `SSL_CTX*` created once, trust store loaded, reused for all connections |
+| `upgradeToTls(c, host)` | **TLS with real verification** | `SSL_set_tlsext_host_name` (SNI), `SSL_set1_host` (name check), `SSL_VERIFY_PEER` (chain check), then `SSL_connect` |
+| `httpGet(url, maxRedirects)` | **redirect-following loop** | for up to N hops: connect, TLS, GET, follow 301/302/303/307, return the final response |
+| `decodeCompactPeers(blob, out)` | **fixed-size record decoding** | split the blob into 6-byte records; reassemble the big-endian IP and port (see below) |
+| `HttpTracker::announce(req, maxRedirects)` | the **orchestrator** | `httpGet` → check 200 → bencode-decode body (Phase 1!) → pull fields → decode peers → `TrackerResponse` |
+
+Three of these deserve a beat:
+
+- **`Connection` — the move-only session wrapper.** It holds a `TcpSocket`
+  plus an `SSL*`, deletes its copy constructor (two owners of one connection =
+  disaster) and implements a **move constructor** that nulls the source's
+  `ssl`. Its destructor `SSL_free`s. So `Connection` is returned *by value*
+  out of `connectTo` and moved around safely — modern C++ resource handling.
+- **The shared `SSL_CTX` (Meyers singleton).** A `static` local inside
+  `sslContext()` is initialised **once, thread-safely, on first use** — the
+  C++ idiom for "a Java `static final` field, but lazy."
+- **Compact-peer decoding, the endianness payoff.** Six bytes per peer:
+  4-byte big-endian IP + 2-byte big-endian port. The code reassembles them by
+  hand — `(b[0]<<24)|(b[1]<<16)|(b[2]<<8)|b[3]` for the IP and
+  `(b[4]<<8)|b[5]` for the port — then `inet_ntop` formats the address as text
+  and pushes a `Peer`. The `size % 6` check up front is "never trust the
+  network": a malformed blob is rejected before we ever index into it.
+
+### The extraction pattern (same defensive habit as Phase 2)
+
+`announce()` pulls `interval`, `complete`, `peers`, … with the identical
+`dict.find(key)` + `getType()` + "ignore if wrong type" approach. Two
+protocol-specific rules on top:
+
+- **`failure reason` short-circuits everything** — if the tracker rejects us
+  (usually a wrong info hash), return immediately with the reason and ignore
+  any peers.
+- **`peers` has two shapes** — a *string* (compact 6-byte blob) or a *list* of
+  dicts (`compact=0`). The code branches on `getType()` and handles both, so
+  it works with old trackers too. A nice example of **polymorphic input
+  handling**.
+
+### The built-in types we rely on here
+
+| Built-in | What it gives us | Java equivalent |
+|---|---|---|
+| `getaddrinfo` / `addrinfo` | DNS resolution returning many addresses | `InetAddress.getAllByName()` |
+| `setsockopt` (`SO_RCVTIMEO`…) | I/O timeouts | `socket.setSoTimeout()` |
+| `inet_ntop` | binary IP → `"1.2.3.4"` text | `InetAddress.getHostAddress()` |
+| `std::istringstream` + `getline` | line-by-line header parsing | `BufferedReader.readLine()` |
+| `std::strtoul(…, 16)` | parse a hex chunk size | `Integer.parseInt(s, 16)` |
+| `std::map<std::string,std::string>` | the (lowercased) HTTP header map | `Map<String,String>` |
+| `std::random_device` | OS randomness for peer_id | `SecureRandom` |
+| `std::string::rfind/find/substr` | URL tokenising | `String.indexOf/substring` |
+| OpenSSL `SSL_CTX` / `SSL` | TLS session | `SSLSocketFactory` / `SSLSocket` |
+| move semantics + `= delete` | single-owner resources | non-`Cloneable`, `AutoCloseable` |
+| RAII destructors | automatic cleanup | `try-with-resources` |
+
+### The algorithms/patterns this phase is a textbook example of
+
+1. **Layered pipeline** — DNS → TCP → TLS → HTTP → bencode → peers, each layer
+   a separate function with a clear contract. (The "onion" of the internet,
+   peeled one function at a time.)
+2. **The happy-pathway loop** — try every resolved address until one connects.
+3. **Timeouts as a design requirement** — `SO_RCVTIMEO`/`SO_SNDTIMEO` so a dead
+   peer costs seconds, not minutes.
+4. **Partial-I/O loops** — `sendAll` and `recvExact`: the discipline of
+   assuming the network gives you *less* than you asked for.
+5. **Percent-encoding (URL encoding)** — turning arbitrary binary into legal
+   URL text and back.
+6. **Conditional separators in query assembly** — the `?` vs `&` trap.
+7. **Singleton via function-local `static`** — one lazily-created `SSL_CTX`.
+8. **Move-only resource wrappers** — `Connection` and `TcpSocket` own OS/TLS
+   resources; copies are *deleted*, moves hand ownership over.
+9. **Polymorphic transport (one API, two backends)** — `sendAll`/`recvSome`
+   work over plain TCP *or* TLS via `if (c.ssl)`.
+10. **Redirect resolution with a hop cap** — following `Location` safely
+    (absolute or root-relative) up to `maxRedirects`.
+11. **Wire-format decoders** — HTTP chunked bodies and 6-byte compact-peer
+    records, each with a `size % n` sanity check.
+12. **Hand-written endianness conversion** — big-endian IP/port reassembly by
+    bit-shifting.
+13. **Failure short-circuit + defensive field extraction** — the Phase 2
+    find-then-type-check habit, now applied to untrusted tracker replies.
+14. **Reuse (DRY)** — `TcpSocket` extracted from the tracker's private code so
+    Phases 4–7 share one socket implementation.
+
+### A one-paragraph mental model
+
+> Phase 3 is a **layered pipeline of small, testable functions** wearing a
+> handful of C++ resource-safety tools. `TrackerRequest` assembles a properly
+> encoded URL; `parseUrl` tokenises it; `connectTo` + `sslContext` +
+> `upgradeToTls` open a *verified* TLS connection (one lazily-created, shared
+> context; one `Connection` that owns its socket and SSL state and can only be
+> *moved*); `performRequest` writes raw HTTP, reads to EOF, splits headers, and
+> un-chunks; `httpGet` loops through redirects; `announce` bencode-decodes the
+> body with Phase 1's decoder, pulls fields defensively, and
+> `decodeCompactPeers` reassembles big-endian 6-byte records into `Peer`
+> objects. The techniques underneath: happy-pathway loops, partial-I/O loops,
+> percent-encoding, a function-local `static` singleton, move-only RAII
+> wrappers, and hand-rolled endianness conversion.
+
 ## The real test output
 
 ```
