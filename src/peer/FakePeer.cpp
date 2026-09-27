@@ -1,14 +1,18 @@
 // =============================================================================
-// FakePeer.cpp - The peer side of the handshake, as a loopback test server.
+// FakePeer.cpp - The peer side of the protocol, as a loopback test server.
 // =============================================================================
 
 #include "peer/FakePeer.hpp"
+
+#include "peer/PeerMessage.hpp"
 
 #include <arpa/inet.h>     // sockaddr_in, inet_ntoa
 #include <cstring>         // memcmp
 #include <netinet/in.h>    // sockaddr_in
 #include <sys/socket.h>    // socket, bind, listen, accept, send, recv
 #include <unistd.h>        // close
+
+#include <algorithm>       // std::min
 
 namespace {
 
@@ -25,10 +29,67 @@ bool readExact(int fd, void* buf, size_t n) {
     return true;
 }
 
+// Send ALL of `n` bytes (the server-side twin of sendAll()).
+bool sendAll(int fd, const void* buf, size_t n) {
+    const char* p = static_cast<const char*>(buf);
+    size_t sent = 0;
+    while (sent < n) {
+        ssize_t r = ::send(fd, p + sent, n - sent, 0);
+        if (r <= 0) return false;
+        sent += static_cast<size_t>(r);
+    }
+    return true;
+}
+
+// Send one length-prefixed peer message: [4-byte length][id][payload].
+// This is the server-side mirror of sendMessage() in PeerMessage.cpp — we
+// write the same bytes, but on a raw file descriptor instead of a TcpSocket.
+bool sendFrame(int fd, uint8_t id, const std::vector<uint8_t>& payload) {
+    uint32_t length = 1 + static_cast<uint32_t>(payload.size());
+    uint8_t header[5];
+    header[0] = static_cast<uint8_t>(length >> 24);
+    header[1] = static_cast<uint8_t>(length >> 16);
+    header[2] = static_cast<uint8_t>(length >> 8);
+    header[3] = static_cast<uint8_t>(length);
+    header[4] = id;
+
+    if (!sendAll(fd, header, 5)) return false;
+    if (!payload.empty() && !sendAll(fd, payload.data(), payload.size())) return false;
+    return true;
+}
+
+// Read one peer message from a raw fd, honoring the length prefix and
+// skipping keep-alives. Returns false on close/error or absurd length.
+// The server-side twin of readMessage().
+bool readFrame(int fd, uint8_t& id, std::vector<uint8_t>& payload) {
+    for (int tries = 0; tries < 16; tries++) {
+        uint8_t lenBytes[4];
+        if (!readExact(fd, lenBytes, 4)) return false;
+        uint32_t length = (static_cast<uint32_t>(lenBytes[0]) << 24) |
+                          (static_cast<uint32_t>(lenBytes[1]) << 16) |
+                          (static_cast<uint32_t>(lenBytes[2]) << 8) |
+                          (static_cast<uint32_t>(lenBytes[3]));
+        if (length == 0) continue;           // keep-alive
+        if (length < 1 || length > kMaxPeerMessageSize) return false;
+
+        std::vector<uint8_t> body(length);
+        if (!readExact(fd, body.data(), length)) return false;
+        id = body[0];
+        payload.assign(body.begin() + 1, body.end());
+        return true;
+    }
+    return false;
+}
+
 }  // namespace
 
 FakePeer::FakePeer(const std::vector<uint8_t>& infoHash, const std::string& serverPeerId)
     : infoHash_(infoHash), serverPeerId_(serverPeerId) {}
+
+FakePeer::FakePeer(const std::vector<uint8_t>& infoHash, const std::string& serverPeerId,
+                   const std::vector<uint8_t>& content, size_t pieceLength)
+    : infoHash_(infoHash), serverPeerId_(serverPeerId),
+      content_(content), pieceLength_(pieceLength), seeder_(true) {}
 
 FakePeer::~FakePeer() {
     if (listenFd_ >= 0) ::close(listenFd_);
@@ -120,11 +181,71 @@ void FakePeer::handleConnection(int clientFd) {
     reply.append(infoHash_.begin(), infoHash_.end());
     reply += serverPeerId_;
 
-    size_t sent = 0;
-    while (sent < reply.size()) {
-        ssize_t n = ::send(clientFd, reply.data() + sent, reply.size() - sent, 0);
-        if (n <= 0) return;
-        sent += static_cast<size_t>(n);
+    if (!sendAll(clientFd, reply.data(), reply.size())) return;
+
+    // Phase 5: in seeder mode, keep talking (piece protocol) after the
+    // handshake. Otherwise we're done, like Phase 4's simple test.
+    if (seeder_) {
+        handleSeeder(clientFd);
+    }
+}
+
+// =============================================================================
+// handleSeeder()
+// =============================================================================
+// Pretend to be a well-behaved seeder for one client:
+//
+//   1. right after the handshake, send our BITFIELD (all pieces owned)
+//   2. when the client says INTERESTED, answer UNCHOKE
+//   3. when the client sends REQUEST(index, begin, length), reply with
+//      PIECE(index, begin, data) for that slice of the content
+//
+// This is the exact wire behaviour a real seeder uses, minus the cleverness
+// (choking algorithms, out-of-order serving, etc. come in Phase 7/8).
+// =============================================================================
+void FakePeer::handleSeeder(int clientFd) {
+    // --- Build the BITFIELD: one bit per piece, MSB-first within each byte.
+    size_t numPieces = (content_.size() + pieceLength_ - 1) / pieceLength_;
+    std::vector<uint8_t> bitfield((numPieces + 7) / 8, 0);
+    for (size_t p = 0; p < numPieces; p++) {
+        bitfield[p / 8] |= static_cast<uint8_t>(0x80 >> (p % 8));
+    }
+    if (!sendFrame(clientFd, MSG_BITFIELD, bitfield)) return;
+
+    uint8_t id = 0;
+    std::vector<uint8_t> payload;
+    while (readFrame(clientFd, id, payload)) {
+        if (id == MSG_INTERESTED) {
+            // Grant access. (Real clients choke/unchoke for fairness; we are
+            // generously always unchoked.)
+            if (!sendFrame(clientFd, MSG_UNCHOKE, {})) return;
+        } else if (id == MSG_REQUEST) {
+            uint32_t index = 0, begin = 0, length = 0;
+            if (!parseRequestPayload(payload, index, begin, length)) return;
+
+            // Bounds-check the request against our content exactly; a request
+            // outside the file (or longer than a block) is an error.
+            uint64_t offset = static_cast<uint64_t>(index) * pieceLength_ + begin;
+            if (offset + length > content_.size() || length > kBlockSize) {
+                return;  // malformed request -> just stop talking
+            }
+
+            // Serve the slice. (destroyByte() flag lets tests prove the
+            // client's SHA-1 check catches corruption.)
+            std::vector<uint8_t> slice(content_.begin() + offset,
+                                       content_.begin() + offset + length);
+            if (destroyedByte_ != std::numeric_limits<size_t>::max() &&
+                destroyedByte_ >= offset && destroyedByte_ < offset + length) {
+                slice[destroyedByte_ - offset] ^= 0xFF;  // one flipped byte
+            }
+
+            if (!sendFrame(clientFd, MSG_PIECE,
+                           buildPiecePayload(index, begin, slice.data(), slice.size()))) {
+                return;
+            }
+        }
+        // Other messages (HAVE, CANCEL, ...) are irrelevant to a generous
+        // fake seeder; keep reading.
     }
 }
 

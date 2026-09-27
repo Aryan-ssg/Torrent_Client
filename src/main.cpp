@@ -28,7 +28,11 @@
 #include "tracker/TrackerRequest.hpp"
 #include "peer/FakePeer.hpp"
 #include "peer/PeerHandshake.hpp"
+#include "peer/PeerMessage.hpp"
+#include "peer/PieceDownloader.hpp"
 #include <iomanip>
+#include <algorithm>   // For std::min, std::equal
+#include <openssl/sha.h>  // For SHA1 (synthetic torrent piece hashes)
 
 // =============================================================================
 // TEST TRACKING VARIABLES
@@ -234,6 +238,121 @@ static void testInvalidInput() {
         // We expect an exception here - this is the correct behavior
         std::cout << "PASS: invalid input detected -> " << e.what() << "\n";
         passed++;
+    }
+}
+
+// =============================================================================
+// PHASE 5 TEST SCENARIO: a small SYNTHETIC torrent we generate in memory
+// =============================================================================
+// Real peers are unreachable from this machine (firewall), so to prove the
+// piece-download pipeline we build a tiny torrent ourselves:
+//
+//   - piece length 16384 bytes (like real torrents)
+//   - file length  37768 bytes (= 2 full pieces + one 5000-byte last piece,
+//                     so we also test the "final piece is shorter" edge case)
+//   - content byte at position i = (piece * 151 + offset * 7 + 3) & 0xFF
+//     (a deterministic formula, so the "expected" bytes are reproducible
+//      without storing 37 KB in this file)
+//   - piece hashes and info hash computed here with the SAME OpenSSL SHA-1
+//     the rest of the project uses
+// -----------------------------------------------------------------------------
+static constexpr size_t kSynPieceLen = 16384;
+static constexpr size_t kSynLastLen = 5000;
+static constexpr size_t kSynLength = 2 * kSynPieceLen + kSynLastLen;  // 37768
+
+// The byte at absolute file position i of the synthetic content.
+static uint8_t syntheticByte(size_t i) {
+    size_t piece = i / kSynPieceLen;
+    size_t offset = i % kSynPieceLen;
+    return static_cast<uint8_t>((piece * 151 + offset * 7 + 3) & 0xFF);
+}
+
+// A slice [begin, begin+len) of the synthetic content.
+static std::vector<uint8_t> syntheticSlice(size_t begin, size_t len) {
+    std::vector<uint8_t> out(len);
+    for (size_t i = 0; i < len; i++) out[i] = syntheticByte(begin + i);
+    return out;
+}
+
+// The whole synthetic file.
+static std::vector<uint8_t> syntheticContent() {
+    return syntheticSlice(0, kSynLength);
+}
+
+// SHA-1 a byte vector -> 20 bytes (OpenSSL).
+static std::vector<uint8_t> sha1Of(const std::vector<uint8_t>& data) {
+    std::vector<uint8_t> hash(SHA_DIGEST_LENGTH);
+    SHA1(data.data(), data.size(), hash.data());
+    return hash;
+}
+
+// A tiny bencode string for building the info dict below.
+static std::string bencString(const std::string& s) {
+    return std::to_string(s.size()) + ":" + s;
+}
+
+// Build the TorrentFile for our synthetic torrent. infoHash is SHA-1 of the
+// RAW bencoded info dict -- the exact "don't re-encode" rule from Phase 2,
+// applied here on the spot (keys in sorted order).
+static TorrentFile makeSyntheticTorrent() {
+    TorrentFile t;
+    t.announce = "https://example.invalid/announce";
+    t.name = "phase5-test.bin";
+    t.pieceLength = kSynPieceLen;
+    t.length = kSynLength;
+
+    // One SHA-1 per piece, concatenated (like TorrentFile.pieces).
+    for (size_t off = 0; off < kSynLength; off += kSynPieceLen) {
+        std::vector<uint8_t> piece = syntheticSlice(off, std::min(kSynPieceLen, kSynLength - off));
+        std::vector<uint8_t> h = sha1Of(piece);
+        t.pieces.insert(t.pieces.end(), h.begin(), h.end());
+    }
+
+    // Raw info dict bytes, then hash them (Phase 2's exact recipe).
+    std::string info = "d";
+    info += bencString("length") + "i" + std::to_string(t.length) + "e";
+    info += bencString("name") + bencString(t.name);
+    info += bencString("piece length") + "i" + std::to_string(t.pieceLength) + "e";
+    info += bencString("pieces") + std::string(t.pieces.begin(), t.pieces.end());
+    info += "e";
+    t.infoHash = sha1Of(std::vector<uint8_t>(info.begin(), info.end()));
+
+    return t;
+}
+
+// Download one piece from a loopback FakePeer seeder and verify it end-to-end.
+// Also checks the assembled bytes MATCH the synthesized content (belt and
+// braces on top of the SHA-1 check).
+static void runPieceDownloadTest(size_t index) {
+    TorrentFile t = makeSyntheticTorrent();
+    std::vector<uint8_t> content = syntheticContent();
+
+    FakePeer server(t.infoHash, "-PF0001-000000000000", content, t.pieceLength);
+    server.start();
+
+    Peer fakePeer;
+    fakePeer.ip = "127.0.0.1";
+    fakePeer.port = server.port();
+
+    size_t pieceLen = std::min<size_t>(t.pieceLength, t.length - index * t.pieceLength);
+    std::vector<uint8_t> expectedHash(t.pieces.begin() + index * 20,
+                                      t.pieces.begin() + index * 20 + 20);
+
+    PieceDownloader::Result r = PieceDownloader::download(
+        fakePeer, t.infoHash, generatePeerId(), static_cast<uint32_t>(index),
+        pieceLen, expectedHash, 4);
+
+    server.join();
+
+    std::vector<uint8_t> want = syntheticSlice(index * kSynPieceLen, pieceLen);
+    if (r.ok && r.data.size() == pieceLen && r.data == want) {
+        std::cout << "PASS: downloaded piece " << (index + 1) << "/3 "
+                  << "(" << pieceLen << " bytes, SHA-1 + content verified)\n";
+        passed++;
+    } else {
+        std::cout << "FAIL: piece " << (index + 1) << "/3 download: "
+                  << r.error << "\n";
+        failed++;
     }
 }
 
@@ -473,6 +592,72 @@ int main() {
     } catch (const std::exception& e) {
         std::cout << "FAIL: loopback handshake test threw " << e.what() << "\n";
         failed++;
+    }
+
+    // -------------------------------------------------------------------------
+    // Peer Message + Piece Download Tests (Phase 5)
+    // -------------------------------------------------------------------------
+    // The FakePeer is now a real seeder on loopback: it serves our synthetic
+    // torrent's content and answers the full protocol conversation. These
+    // tests prove the piece-message layer AND the SHA-1 piece verification.
+    // -------------------------------------------------------------------------
+    std::cout << "\n=== Peer Message + Piece Download Tests (Phase 5) ===\n\n";
+
+    // 1. Pure codec test: REQUEST payloads are [index][begin][length], all
+    //    big-endian. Build one, parse it back, compare.
+    {
+        bool ok = false;
+        try {
+            std::vector<uint8_t> p = buildRequestPayload(2, kSynPieceLen, kSynLastLen);
+            uint32_t index = 0, begin = 0, length = 0;
+            ok = parseRequestPayload(p, index, begin, length) &&
+                 index == 2 && begin == kSynPieceLen && length == kSynLastLen;
+        } catch (const std::exception& e) {
+            std::cout << "FAIL: request payload round-trip threw " << e.what() << "\n";
+        }
+        if (ok) {
+            std::cout << "PASS: request payload round-trip (index/begin/length, big-endian)\n";
+            passed++;
+        } else {
+            std::cout << "FAIL: request payload round-trip\n";
+            failed++;
+        }
+    }
+
+    // 2. Download all three pieces (two full 16 KiB, one short final piece).
+    runPieceDownloadTest(0);
+    runPieceDownloadTest(1);
+    runPieceDownloadTest(2);
+
+    // 3. The "never trust the network" proof: a seeder that flips one byte
+    //    in the data it serves. The SHA-1 check MUST reject the piece.
+    {
+        TorrentFile t = makeSyntheticTorrent();
+        std::vector<uint8_t> content = syntheticContent();
+
+        FakePeer server(t.infoHash, "-PF0001-000000000000", content, t.pieceLength);
+        server.destroyByte(12345);  // corrupt one byte inside piece 0
+        server.start();
+
+        Peer fakePeer;
+        fakePeer.ip = "127.0.0.1";
+        fakePeer.port = server.port();
+
+        std::vector<uint8_t> expectedHash(t.pieces.begin(), t.pieces.begin() + 20);
+        PieceDownloader::Result r = PieceDownloader::download(
+            fakePeer, t.infoHash, generatePeerId(), 0, kSynPieceLen, expectedHash, 4);
+
+        server.join();
+
+        if (!r.ok && r.error.find("SHA-1") != std::string::npos) {
+            std::cout << "PASS: corrupted piece rejected by SHA-1 ("
+                      << r.error << ")\n";
+            passed++;
+        } else {
+            std::cout << "FAIL: corrupted piece should have been rejected, got: "
+                      << (r.ok ? "ok=true" : r.error) << "\n";
+            failed++;
+        }
     }
 
     // Summary

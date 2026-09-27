@@ -47,7 +47,7 @@ Every phase applies these in code:
 5. **Graceful failure.** `perform()` variants return a result with an error
    string rather than crashing the whole client.
 
-## The complete file map (Phases 0–4)
+## The complete file map (Phases 0–5)
 
 | File | Purpose (plain-English) |
 |---|---|
@@ -76,6 +76,10 @@ Every phase applies these in code:
 | `include/peer/PeerHandshake.hpp` | the handshake interface + `Result` struct |
 | `src/peer/PeerHandshake.cpp` | build 68-byte handshake, send, read exactly 68, verify info_hash |
 | `include/peer/FakePeer.hpp` / `src/peer/FakePeer.cpp` | loopback test server playing the peer side (preview of Phase 8 server socket) |
+| **Phase 5 — messages + piece download** | |
+| `include/peer/PeerMessage.hpp` | the length-prefixed wire format + the message ids + `sendMessage`/`readMessage` |
+| `src/peer/PeerMessage.cpp` | framing helpers, big-endian request/piece payload build/parse |
+| `include/peer/PieceDownloader.hpp` / `src/peer/PieceDownloader.cpp` | download ONE piece: handshake → interested → unchoke → request blocks → SHA-1 verify |
 
 ## How the tests are organized
 
@@ -91,6 +95,11 @@ Every phase applies these in code:
 === Peer Handshake Tests ===       (attempt up to 25 real peers — graceful
                                     failures on this restricted network)
 --- Deterministic loopback test ---(handshake against FakePeer on 127.0.0.1)
+=== Peer Message + Piece Download Tests ===
+                                    (request payload codec round-trip;
+                                    download 3 pieces from a loopback seeder:
+                                    2 full 16 KiB + the shorter final piece;
+                                    corrupted data rejected by SHA-1)
 === Results ===                     Passed: N / Failed: M
 ```
 
@@ -108,7 +117,7 @@ A completely clean rebuild (if things ever feel stale):
 rm -rf build && cmake -B build && cmake --build build && ./build/peerflow
 ```
 
-## Current status (Phases 0–4)
+## Current status (Phases 0–5)
 
 ```
 Phase 0  Setup & tools         ✅ done
@@ -116,25 +125,21 @@ Phase 1  Bencode decoder       ✅ done  (16 tests)
 Phase 2  Torrent parser        ✅ done  (info hash verified)
 Phase 3  Tracker announce      ✅ done  (Peers found: 50)
 Phase 4  Peer handshake        ✅ done  (loopback proof; real peers blocked by firewall here)
-Phase 5  Messages + pieces     ⬜ next: request blocks, receive a piece, SHA-1 verify it
-Phase 6  Piece manager + disk  ⬜ write files, resume
+Phase 5  Messages + pieces     ✅ done  (loopback seeder: 3 pieces downloaded & SHA-1 verified,
+                                        corrupted piece rejected; 25 tests total)
+Phase 6  Piece manager + disk  ⬜ next: download all pieces, write the file, resume
 Phase 7  Many peers            ⬜ concurrency
 Phase 8  Upload / seeding      ⬜ listening + tit-for-tat
 Phase 9  Extras                ⬜ magnet links, UDP trackers, DHT
 ```
 
-## The road ahead (Phase 5 in one breath)
+## The road ahead (Phase 6 in one breath)
 
-Next we speak the **peer wire messages (the small length-prefixed messages
-exchanged between peers after the handshake)**:
-
-```
-[4-byte length][1-byte ID][payload]
-```
-
-with IDs like `unchoke`, `interested`, `request`, `piece`, `bitfield`. We'll
-ask a peer for 16 KB blocks of a piece, assemble them, SHA-1 them against
-Phase 2's `pieces` hashes, and finally download our first verified piece.
+Phase 5 proved we can fetch **one** honest piece. Phase 6 turns that into a
+**piece manager**: track which pieces we own, fetch the remaining ones, write
+the finished file to disk, and (eventually) resume an interrupted download by
+remembering which pieces are already verified. The loopback seeder grows up
+into a way to download a whole synthetic file end-to-end.
 
 ---
 

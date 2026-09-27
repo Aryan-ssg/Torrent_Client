@@ -56,6 +56,8 @@ add_executable(peerflow
     src/tracker/HttpTracker.cpp
     src/net/TcpSocket.cpp
     src/peer/PeerHandshake.cpp
+    src/peer/PeerMessage.cpp
+    src/peer/PieceDownloader.cpp
     src/peer/FakePeer.cpp
 )
 

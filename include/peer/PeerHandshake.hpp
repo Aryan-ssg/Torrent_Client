@@ -25,7 +25,8 @@
 // magic token in the first request and checking the token in the response.
 // =============================================================================
 
-#include "tracker/Peer.hpp"  // For your self.dev peers (ip + port)
+#include "tracker/Peer.hpp"      // For our peer address type (ip + port)
+#include "net/TcpSocket.hpp"     // For the exchange() overload (Phase 5)
 
 #include <cstdint>   // For uint8_t
 #include <string>    // For std::string
@@ -46,4 +47,11 @@ public:
                           const std::vector<uint8_t>& infoHash,
                           const std::string& ourPeerId,
                           int timeoutSeconds = 10);
+
+    // Same handshake, but over an ALREADY-connected socket. Phase 5's
+    // PieceDownloader connects once, then reuses this for the handshake
+    // before speaking peer messages on the same connection.
+    static Result exchange(TcpSocket& socket,
+                           const std::vector<uint8_t>& infoHash,
+                           const std::string& ourPeerId);
 };

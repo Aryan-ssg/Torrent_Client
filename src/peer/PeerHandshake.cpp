@@ -31,6 +31,49 @@ static string buildHandshake(const std::vector<uint8_t>& infoHash, const string&
 }
 
 // =============================================================================
+// exchange()
+// =============================================================================
+// The handshake over an ALREADY-connected socket: send our 68 bytes, read
+// exactly 68 back, and run the four checks. Used by perform() (Phase 4) after
+// connect(), and by PieceDownloader (Phase 5) right before peer messages.
+// =============================================================================
+PeerHandshake::Result PeerHandshake::exchange(TcpSocket& socket,
+                                              const std::vector<uint8_t>& infoHash,
+                                              const string& ourPeerId) {
+    Result result;
+
+    string handshake = buildHandshake(infoHash, ourPeerId);
+    socket.sendAll(handshake.data(), handshake.size());
+
+    // The reply can arrive in any number of chunks, so use recvExact.
+    unsigned char reply[68];
+    socket.recvExact(reply, 68);
+
+    // 1. First byte must be 19 (the protocol name length).
+    if (reply[0] != 19) {
+        result.error = "bad first byte " + std::to_string(reply[0]);
+        return result;
+    }
+
+    // 2. Bytes 1..19 must be the protocol name.
+    if (string(reinterpret_cast<char*>(reply) + 1, 19) != "BitTorrent protocol") {
+        result.error = "wrong protocol string";
+        return result;
+    }
+
+    // 3. Bytes 28..47 must be OUR info_hash (this is the critical check!).
+    if (!std::equal(infoHash.begin(), infoHash.end(), reply + 28)) {
+        result.error = "info_hash mismatch - peer serves a different torrent";
+        return result;
+    }
+
+    // 4. All good - grab the peer's 20-byte peer_id for display/logging.
+    result.ok = true;
+    result.peerId.assign(reinterpret_cast<char*>(reply) + 48, 20);
+    return result;
+}
+
+// =============================================================================
 // perform()
 // =============================================================================
 // Handshake layout of the reply (same 68 bytes, info_hash + peer_id swapped):
@@ -58,34 +101,7 @@ PeerHandshake::Result PeerHandshake::perform(const Peer& peer,
         // TcpSocket::connect() resolves them (or the hostname) via getaddrinfo.
         socket.connect(peer.ip, std::to_string(peer.port), timeoutSeconds);
 
-        string handshake = buildHandshake(infoHash, ourPeerId);
-        socket.sendAll(handshake.data(), handshake.size());
-
-        // The reply can arrive in any number of chunks, so use recvExact.
-        unsigned char reply[68];
-        socket.recvExact(reply, 68);
-
-        // 1. First byte must be 19 (the protocol name length).
-        if (reply[0] != 19) {
-            result.error = "bad first byte " + std::to_string(reply[0]);
-            return result;
-        }
-
-        // 2. Bytes 1..19 must be the protocol name.
-        if (string(reinterpret_cast<char*>(reply) + 1, 19) != "BitTorrent protocol") {
-            result.error = "wrong protocol string";
-            return result;
-        }
-
-        // 3. Bytes 28..47 must be OUR info_hash (this is the critical check!).
-        if (!std::equal(infoHash.begin(), infoHash.end(), reply + 28)) {
-            result.error = "info_hash mismatch - peer serves a different torrent";
-            return result;
-        }
-
-        // 4. All good - grab the peer's 20-byte peer_id for display/logging.
-        result.ok = true;
-        result.peerId.assign(reinterpret_cast<char*>(reply) + 48, 20);
+        result = exchange(socket, infoHash, ourPeerId);
     } catch (const std::exception& e) {
         result.error = e.what();  // "could not connect", "timed out", ...
     }
