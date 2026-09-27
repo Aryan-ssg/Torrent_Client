@@ -51,6 +51,10 @@ public:
     // Block until all expected connections have been handled.
     void join();
 
+    // Close the listen socket so join() returns early even if the downloader
+    // stopped before every expected connection arrived (e.g. an aborted run).
+    void shutdown();
+
     uint16_t port() const { return port_; }
 
     // 1 if a client sent a valid handshake for our info_hash, else 0.
@@ -59,6 +63,16 @@ public:
     // Corrupt the piece data: flips one byte at file offset `index`. Use this
     // to prove the client's SHA-1 check really rejects bad data.
     void destroyByte(size_t index) { destroyedByte_ = index; }
+
+    // Simulate a slow link (Phase 7): sleep this many ms while serving EACH
+    // connection, so a timing test can see that several peers make a download
+    // finish faster than one peer alone.
+    void setServeDelayMs(int ms) { serveDelayMs_ = ms; }
+
+    // How many connections this peer actually served. Phase 7 checks the TOTAL
+    // across all fake peers equals the number of pieces fetched - which proves
+    // the "claim" logic stopped any piece from being downloaded twice.
+    int servedCount() const { return servedCount_; }
 
 private:
     void acceptLoop();        // accept() one connection
@@ -80,4 +94,10 @@ private:
 
     // How many incoming connections to serve before the thread exits.
     int maxConnections_ = 1;
+
+    // Optional artificial latency applied per served connection (Phase 7).
+    int serveDelayMs_ = 0;
+
+    // How many connections we actually served (set by acceptLoop).
+    int servedCount_ = 0;
 };

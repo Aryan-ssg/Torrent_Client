@@ -48,8 +48,9 @@ std::vector<uint8_t> readPiece(std::fstream& file, long pieceOffset, size_t len)
 PieceManager::PieceManager(const TorrentFile& torrent, const std::string& outputPath)
     : torrent_(torrent), outputPath_(outputPath), fullLength_(torrent.length) {
     // Piece count: one piece per 20-byte SHA-1 in the torrent's pieces blob.
+    // Everything starts PENDING (not yet fetched).
     size_t n = torrent_.pieces.size() / 20;
-    owned_.assign(n, 0);
+    states_.assign(n, State::kPending);
 
     if (n == 0) {
         throw FileException("Torrent has zero pieces");
@@ -83,28 +84,53 @@ size_t PieceManager::pieceLength(size_t index) const {
 }
 
 size_t PieceManager::completedCount() const {
+    std::lock_guard<std::mutex> lock(mutex_);
     size_t count = 0;
-    for (uint8_t o : owned_) count += (o != 0);
+    for (State s : states_) count += (s == State::kOwned);
     return count;
 }
 
 bool PieceManager::complete() const {
-    return completedCount() == owned_.size();
+    std::lock_guard<std::mutex> lock(mutex_);
+    for (State s : states_) {
+        if (s != State::kOwned) return false;
+    }
+    return true;
 }
 
 bool PieceManager::hasPiece(size_t index) const {
-    return index < owned_.size() && owned_[index] != 0;
+    std::lock_guard<std::mutex> lock(mutex_);
+    return index < states_.size() && states_[index] == State::kOwned;
 }
 
 size_t PieceManager::nextPieceToFetch() const {
-    for (size_t i = 0; i < owned_.size(); i++) {
-        if (owned_[i] == 0) return i;
+    std::lock_guard<std::mutex> lock(mutex_);
+    for (size_t i = 0; i < states_.size(); i++) {
+        if (states_[i] == State::kPending) return i;
     }
     return kNotFound;
 }
 
+bool PieceManager::claimPiece(size_t index) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (index >= states_.size() || states_[index] != State::kPending) {
+        return false;   // already claimed by another worker, or already owned
+    }
+    states_[index] = State::kClaimed;
+    return true;
+}
+
+void PieceManager::releasePiece(size_t index) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (index < states_.size() && states_[index] == State::kClaimed) {
+        states_[index] = State::kPending;  // available for someone else to retry
+    }
+}
+
 bool PieceManager::storePiece(size_t index, const std::vector<uint8_t>& bytes) {
-    if (index >= owned_.size()) return false;
+    std::lock_guard<std::mutex> lock(mutex_);
+
+    if (index >= states_.size()) return false;
 
     // 1. Exact size, then exact hash. Nothing touches disk on a mismatch.
     //    This is genuinely the last line of defense: even if every layer
@@ -112,7 +138,9 @@ bool PieceManager::storePiece(size_t index, const std::vector<uint8_t>& bytes) {
     if (bytes.size() != pieceLength(index)) return false;
     if (!hashMatches(bytes, torrent_.pieces.data() + index * 20)) return false;
 
-    // 2. Write at the piece's absolute offset inside the file.
+    // 2. Write at the piece's absolute offset inside the file. (Held under
+    //    the mutex: only one thread writes the fstream at a time, and the
+    //    seek+write must be atomic with respect to claim/store decisions.)
     uint64_t offset = static_cast<uint64_t>(index) * torrent_.pieceLength;
     file_.seekp(static_cast<std::streamoff>(offset));
     file_.write(reinterpret_cast<const char*>(bytes.data()),
@@ -124,7 +152,7 @@ bool PieceManager::storePiece(size_t index, const std::vector<uint8_t>& bytes) {
     }
     file_.flush();
 
-    owned_[index] = 1;
+    states_[index] = State::kOwned;  // claim resolved: owned and on disk
     return true;
 }
 
@@ -133,10 +161,13 @@ void PieceManager::scanDisk() {
     // still hashes correctly counts as owned. A partial download or a few
     // corrupted bytes costs only the pieces that actually failed - the rest
     // is spared the re-download.
-    for (size_t i = 0; i < owned_.size(); i++) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    for (size_t i = 0; i < states_.size(); i++) {
         long offset = static_cast<long>(i) * torrent_.pieceLength;
         std::vector<uint8_t> bytes = readPiece(file_, offset, pieceLength(i));
-        owned_[i] = (bytes.size() == pieceLength(i) &&
-                     hashMatches(bytes, torrent_.pieces.data() + i * 20)) ? 1 : 0;
+        states_[i] = (bytes.size() == pieceLength(i) &&
+                      hashMatches(bytes, torrent_.pieces.data() + i * 20))
+                         ? State::kOwned
+                         : State::kPending;
     }
 }

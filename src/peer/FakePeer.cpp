@@ -13,6 +13,8 @@
 #include <unistd.h>        // close
 
 #include <algorithm>       // std::min
+#include <chrono>          // std::chrono::milliseconds (Phase 7 latency)
+#include <thread>          // std::this_thread::sleep_for (Phase 7 latency)
 
 namespace {
 
@@ -145,6 +147,7 @@ void FakePeer::acceptLoop() {
         if (clientFd < 0) return;   // listen socket closed (destructor)
         handleConnection(clientFd);
         ::close(clientFd);
+        servedCount_++;
     }
 }
 
@@ -206,6 +209,13 @@ void FakePeer::handleConnection(int clientFd) {
 // (choking algorithms, out-of-order serving, etc. come in Phase 7/8).
 // =============================================================================
 void FakePeer::handleSeeder(int clientFd) {
+    // Phase 7: optional artificial latency, so a timing test can observe that
+    // several peers (each in its own thread) finish sooner than one peer
+    // alone. A real slow modem peer "thinks" exactly like this.
+    if (serveDelayMs_ > 0) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(serveDelayMs_));
+    }
+
     // --- Build the BITFIELD: one bit per piece, MSB-first within each byte.
     size_t numPieces = (content_.size() + pieceLength_ - 1) / pieceLength_;
     std::vector<uint8_t> bitfield((numPieces + 7) / 8, 0);
@@ -253,4 +263,19 @@ void FakePeer::handleSeeder(int clientFd) {
 
 void FakePeer::join() {
     if (thread_.joinable()) thread_.join();
+}
+
+// =============================================================================
+// shutdown()
+// =============================================================================
+// Close the listen socket so a blocked accept() fails and the loop exits.
+// Used when the downloader is DONE talking (e.g. it aborted early) but the
+// peer is still parked awaiting connections that will never arrive; join()
+// can then return instead of hanging forever.
+// =============================================================================
+void FakePeer::shutdown() {
+    if (listenFd_ >= 0) {
+        ::close(listenFd_);
+        listenFd_ = -1;
+    }
 }

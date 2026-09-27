@@ -58,6 +58,7 @@ add_executable(peerflow
     src/peer/PeerHandshake.cpp
     src/peer/PeerMessage.cpp
     src/peer/PieceDownloader.cpp
+    src/peer/ConcurrentDownloader.cpp
     src/peer/FakePeer.cpp
     src/piece/PieceManager.cpp
 )

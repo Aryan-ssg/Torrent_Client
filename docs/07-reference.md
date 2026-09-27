@@ -80,6 +80,7 @@ Every phase applies these in code:
 | `include/peer/PeerMessage.hpp` | the length-prefixed wire format + the message ids + `sendMessage`/`readMessage` |
 | `src/peer/PeerMessage.cpp` | framing helpers, big-endian request/piece payload build/parse |
 | `include/peer/PieceDownloader.hpp` / `src/peer/PieceDownloader.cpp` | download ONE piece: handshake → interested → unchoke → request blocks → SHA-1 verify |
+| `include/peer/ConcurrentDownloader.hpp` / `src/peer/ConcurrentDownloader.cpp` | Phase 7: many worker threads share one PieceManager; claim → download → store, failures released for retry |
 | **Phase 6 — piece manager + disk** | |
 | `include/piece/PieceManager.hpp` / `src/piece/PieceManager.cpp` | preallocate the file, ownership bitmap, `storePiece()` (SHA-1 gate + offset write), `nextPieceToFetch()`, `scanDisk()` resume |
 | `include/piece/FileException.hpp` | the "disk layer failed" exception (open/truncate/write errors) |
@@ -108,6 +109,11 @@ Every phase applies these in code:
                                     result; resume via scanDisk() after 3/8;
                                     one corrupted byte on disk detected and
                                     refetched; storePiece rejects garbage)
+=== Parallel Download Tests ===     (4 workers + 4 loopback seeders: all 12
+                                    pieces fetched with EXACTLY 12 connections
+                                    - the claim state stops duplicates - and
+                                    the file byte-matches; timing: 8 pieces in
+                                    ~250 ms vs ~960 ms over one peer)
 === Results ===                     Passed: N / Failed: M
 ```
 
@@ -116,7 +122,7 @@ Every phase applies these in code:
 ```bash
 cmake -B build          # configure
 cmake --build build     # compile
-./build/peerflow        # run all 32 tests
+./build/peerflow        # run all 34 tests
 ```
 
 A completely clean rebuild (if things ever feel stale):
@@ -125,7 +131,7 @@ A completely clean rebuild (if things ever feel stale):
 rm -rf build && cmake -B build && cmake --build build && ./build/peerflow
 ```
 
-## Current status (Phases 0–6)
+## Current status (Phases 0–7)
 
 ```
 Phase 0  Setup & tools         ✅ done
@@ -138,21 +144,22 @@ Phase 5  Messages + pieces     ✅ done  (loopback seeder: 3 pieces downloaded &
 Phase 6  Piece manager + disk  ✅ done  (8-piece synthetic file downloaded to disk and
                                         byte-verified; resume + disk-corruption recovery;
                                         storePiece gate; hardened parser (overflow +
-                                        nesting-depth caps); 32 tests total)
-Phase 7  Many peers            ⬜ concurrency
+                                        nesting-depth caps))
+Phase 7  Many peers            ✅ done  (4 workers + 4 seeders: 12 pieces fetched with exactly
+                                        12 connections - claim stops duplicate work; timing
+                                        test shows ~4x speedup; 34 tests total)
 Phase 8  Upload / seeding      ⬜ listening + tit-for-tat
 Phase 9  Extras                ⬜ magnet links, UDP trackers, DHT
 ```
 
-## The road ahead (Phase 7 in one breath)
+## The road ahead (Phase 8 in one breath)
 
-Phase 6 downloads pieces **one at a time**: the manager asks for the next
-missing piece, waits for it, writes it, and repeats — one network round trip
-per block. Phase 7 makes it fast: many TCP connections to many peers at once,
-each pulling different blocks of the same piece, coordinated through the
-manager. The last big missing piece before Phase 7 is a **real server side**
-(Phase 8: listening + seeding), so for now the loopback `FakePeer` seeder
-keeps playing that part.
+Phase 7 downloads in parallel using peer threads and a thread-safe piece
+manager. Phase 8 flips a client into a **server**: listen on a port, accept
+incoming handshakes, and seed the pieces we already own to other people's
+clients (its socket/bind/listen/accept core has been previewed by `FakePeer`
+since Phase 4). Tit-for-tat (only upload to peers who upload to us) is the
+last of the swarm maths left to build.
 
 ---
 

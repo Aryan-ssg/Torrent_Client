@@ -30,10 +30,12 @@
 #include "peer/PeerHandshake.hpp"
 #include "peer/PeerMessage.hpp"
 #include "peer/PieceDownloader.hpp"
+#include "peer/ConcurrentDownloader.hpp"
 #include "piece/PieceManager.hpp"
 #include <iomanip>
 #include <algorithm>   // For std::min, std::equal
 #include <cstdio>      // For std::remove (reset test files between runs)
+#include <chrono>      // For std::chrono (Phase 7 timing test)
 #include <openssl/sha.h>  // For SHA1 (synthetic torrent piece hashes)
 #include <fstream>     // For std::ifstream / std::fstream (Phase 6 disk checks)
 
@@ -1010,6 +1012,159 @@ int main() {
                 passed++;
             } else {
                 std::cout << "FAIL: storePiece accepted something it should reject\n";
+                failed++;
+            }
+        }
+    }
+
+    // =============================================================================
+    // PHASE 7 TEST SCENARIO: many workers + many peers downloading in parallel
+    // =============================================================================
+    // Phase 6 would fetch every piece one-at-a-time through ONE peer. Phase 7
+    // spawns N worker threads sharing one PieceManager; whoever claims a piece
+    // downloads it from peers[idx % N], so all N seeders work at the same time.
+    // Tests:
+    //
+    //   A. correctness:  4 workers + 4 seeders grab all 12 pieces; sum of the
+    //                     seeders' servedCount must be EXACTLY 12 - proving the
+    //                     claim state stopped duplicate downloads, and the file
+    //                     on disk matches the synthesized content byte-for-byte
+    //   B. speedup:      with an artificial 120 ms latency per connection,
+    //                     8 pieces via one peer would take ~960 ms; via 4 peers
+    //                     it should finish well under that (real wall-clock)
+    {
+        constexpr size_t k7LastLen = 7000;
+        std::cout << "\n=== Parallel Download Tests (Phase 7) ===\n\n";
+
+        // -- A. Correctness + no duplicate downloads -------------------------
+        {
+            const size_t k7Total = 11 * kSynPieceLen + k7LastLen;  // 12 pieces
+            const std::string outPath = "build/phase7-out.bin";
+            std::remove(outPath.c_str());
+
+            TorrentFile t = makeSyntheticTorrent(kSynPieceLen, k7Total);
+            std::vector<uint8_t> content = syntheticContent(kSynPieceLen, k7Total);
+
+            constexpr int kWorkers = 4;
+            const std::string ourId = generatePeerId();
+
+            // Four seeders. Each gets a distinct peer_id; the downloader maps
+            // piece idx -> peers[idx % 4], so every seeder serves the same
+            // number of connections (3 each here) - guaranteed, not lucky.
+            FakePeer seeders[kWorkers] = {
+                FakePeer(t.infoHash, "-PF0007-000000000001", content, t.pieceLength),
+                FakePeer(t.infoHash, "-PF0007-000000000002", content, t.pieceLength),
+                FakePeer(t.infoHash, "-PF0007-000000000003", content, t.pieceLength),
+                FakePeer(t.infoHash, "-PF0007-000000000004", content, t.pieceLength)};
+            int piecesPerWorker = (pieceCountFor(kSynPieceLen, k7Total) + kWorkers - 1) / kWorkers;
+            std::vector<Peer> swarm;
+            for (int i = 0; i < kWorkers; i++) {
+                seeders[i].setMaxConnections(piecesPerWorker);
+                seeders[i].start();
+                Peer p;
+                p.ip = "127.0.0.1";
+                p.port = seeders[i].port();
+                swarm.push_back(p);
+            }
+
+            bool okRun = false;
+            try {
+                ConcurrentDownloader::Result r = ConcurrentDownloader::download(
+                    t, swarm, outPath, ourId, kWorkers, 4);
+                okRun = r.ok && r.piecesDownloaded == pieceCountFor(kSynPieceLen, k7Total);
+                if (!okRun) {
+                    std::cout << "  (download error: " << r.error
+                              << " pieces=" << r.piecesDownloaded << ")\n";
+                }
+            } catch (const std::exception& e) {
+                std::cout << "FAIL: parallel download threw " << e.what() << "\n";
+            }
+
+            int totalServed = 0;
+            for (int i = 0; i < kWorkers; i++) {
+                // Stop each seeder (in case the run aborted early) then wait
+                // for it, so join() can never hang on phantom connections.
+                seeders[i].shutdown();
+                seeders[i].join();
+                totalServed += seeders[i].servedCount();
+            }
+
+            std::ifstream saved(outPath, std::ios::binary);
+            std::vector<uint8_t> onDisk((std::istreambuf_iterator<char>(saved)),
+                                        std::istreambuf_iterator<char>());
+
+            const size_t expected = pieceCountFor(kSynPieceLen, k7Total);
+            if (okRun && totalServed == static_cast<int>(expected) && onDisk == content) {
+                std::cout << "PASS: 4 workers/4 peers fetched all " << expected
+                          << " pieces exactly once each (" << totalServed
+                          << " connections, file byte-verified)\n";
+                passed++;
+            } else {
+                std::cout << "FAIL: parallel correctness (served=" << totalServed
+                          << " expected=" << expected
+                          << " bytesMatch=" << (onDisk == content) << ")\n";
+                failed++;
+            }
+        }
+
+        // -- B. Parallel speedup (timing) -----------------------------------
+        {
+            const size_t k7Total = 7 * kSynPieceLen + k7LastLen;  // 8 pieces
+            const std::string outPath = "build/phase7-timing.bin";
+            std::remove(outPath.c_str());
+
+            TorrentFile t = makeSyntheticTorrent(kSynPieceLen, k7Total);
+            std::vector<uint8_t> content = syntheticContent(kSynPieceLen, k7Total);
+
+            constexpr int kWorkers = 4;
+            constexpr int kDelayMs = 120;   // latency each seeder fakes per connection
+            const std::string ourId = generatePeerId();
+
+            FakePeer seeders[kWorkers] = {
+                FakePeer(t.infoHash, "-PF0007-000000000001", content, t.pieceLength),
+                FakePeer(t.infoHash, "-PF0007-000000000002", content, t.pieceLength),
+                FakePeer(t.infoHash, "-PF0007-000000000003", content, t.pieceLength),
+                FakePeer(t.infoHash, "-PF0007-000000000004", content, t.pieceLength)};
+            int piecesPerWorker = (pieceCountFor(kSynPieceLen, k7Total) + kWorkers - 1) / kWorkers;
+            std::vector<Peer> swarm;
+            for (int i = 0; i < kWorkers; i++) {
+                seeders[i].setMaxConnections(piecesPerWorker);
+                seeders[i].setServeDelayMs(kDelayMs);  // fake a slow link
+                seeders[i].start();
+                Peer p;
+                p.ip = "127.0.0.1";
+                p.port = seeders[i].port();
+                swarm.push_back(p);
+            }
+
+            auto t0 = std::chrono::steady_clock::now();
+            ConcurrentDownloader::Result r = ConcurrentDownloader::download(
+                t, swarm, outPath, ourId, kWorkers, 4);
+            auto t1 = std::chrono::steady_clock::now();
+            long long elapsedMs =
+                std::chrono::duration_cast<std::chrono::milliseconds>(t1 - t0).count();
+            for (int i = 0; i < kWorkers; i++) {
+                seeders[i].shutdown();  // never let join() wait for ghosts
+                seeders[i].join();
+            }
+
+            // One seeder alone would have spent 8 * 120 = 960 ms just sleeping.
+            // Four parallel seeders should be far below that. A fast machine
+            // might not *need* the whole 960 ms ceiling - 650 ms it is.
+            const long long sequentialTimeMs = static_cast<long long>(
+                pieceCountFor(kSynPieceLen, k7Total) * kDelayMs);
+            std::ifstream saved(outPath, std::ios::binary);
+            std::vector<uint8_t> onDisk((std::istreambuf_iterator<char>(saved)),
+                                        std::istreambuf_iterator<char>());
+            if (r.ok && onDisk == content && elapsedMs < sequentialTimeMs * 2 / 3) {
+                std::cout << "PASS: parallel speedup - " << pieceCountFor(kSynPieceLen, k7Total)
+                          << " pieces in " << elapsedMs << " ms (sequential would be ~"
+                          << sequentialTimeMs << " ms)\n";
+                passed++;
+            } else {
+                std::cout << "FAIL: parallel speedup (ok=" << r.ok
+                          << " elapsed=" << elapsedMs << " ms vs sequential ~"
+                          << sequentialTimeMs << " ms)\n";
                 failed++;
             }
         }
