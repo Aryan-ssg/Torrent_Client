@@ -48,12 +48,16 @@ set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 find_package(OpenSSL REQUIRED COMPONENTS SSL Crypto)
 find_package(Threads REQUIRED)
 
-add_executable(peerflow
-    src/main.cpp
+# The shared implementation. Both binaries below are thin entry points on top
+# of exactly this code, so the engine is compiled once and linked twice.
+# (In Java/Maven this is the difference between one artifact with two mains
+# and a jar plus a separate test jar; here it is a static library.)
+add_library(peerflow_core STATIC
     src/bencode/BencodeDecoder.cpp
     src/torrent/TorrentParser.cpp
     src/tracker/TrackerRequest.cpp
     src/tracker/HttpTracker.cpp
+    src/tracker/TrackerPool.cpp
     src/net/TcpSocket.cpp
     src/peer/PeerHandshake.cpp
     src/peer/PeerMessage.cpp
@@ -62,9 +66,18 @@ add_executable(peerflow
     src/peer/FakePeer.cpp
     src/piece/PieceManager.cpp
 )
+target_include_directories(peerflow_core PUBLIC include)
+target_link_libraries(peerflow_core PUBLIC OpenSSL::SSL OpenSSL::Crypto Threads::Threads)
 
-target_include_directories(peerflow PRIVATE include)
-target_link_libraries(peerflow PRIVATE OpenSSL::SSL OpenSSL::Crypto Threads::Threads)
+# The command-line client:  ./build/peerflow something.torrent
+add_executable(peerflow src/main.cpp)
+target_link_libraries(peerflow PRIVATE peerflow_core)
+
+# The automated test suite:  ./build/peerflow-tests
+# Kept as its own binary so the CLI stays quick to build and link, and so the
+# suite can be run on its own (including from a CI script).
+add_executable(peerflow-tests src/tests/TestMain.cpp src/tests/TestRunner.cpp)
+target_link_libraries(peerflow-tests PRIVATE peerflow_core)
 
 # =============================================================================
 # HOW TO BUILD

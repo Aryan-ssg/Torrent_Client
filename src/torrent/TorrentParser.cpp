@@ -197,6 +197,34 @@ TorrentFile TorrentParser::parse(const std::string& filepath) {
         torrent.announce = announceIt->second.stringValueAsUtf8();
     }
 
+    // Step 3b: Extract announce-list (BEP 12) when present.
+    //
+    // Shape: a list of TIERS, each tier a list of tracker URLs. Tier order
+    // matters (try tier 0 first); order within a tier does not (they are
+    // interchangeable, which is exactly why the pool announces them all
+    // concurrently).
+    //
+    // "Never trust the input": a torrent is untrusted data, so every level is
+    // type-checked. A malformed announce-list is ignored rather than fatal -
+    // `announce` is still there as a fallback, and a client that refuses to
+    // start because of a broken extra key is worse than one that copes.
+    auto alIt = top.find("announce-list");
+    if (alIt != top.end() && alIt->second.getType() == BencodeValue::LIST) {
+        for (const auto& tierValue : alIt->second.asList()) {
+            if (tierValue.getType() != BencodeValue::LIST) continue;  // not a tier
+
+            std::vector<std::string> tier;
+            for (const auto& urlValue : tierValue.asList()) {
+                if (urlValue.getType() != BencodeValue::STRING) continue;
+                std::string url = urlValue.stringValueAsUtf8();
+                if (!url.empty()) tier.push_back(url);
+            }
+            // An empty tier is meaningless; drop it rather than burn an
+            // announce attempt discovering there is nothing to announce to.
+            if (!tier.empty()) torrent.announceTiers.push_back(std::move(tier));
+        }
+    }
+
     // Step 4: Extract info dictionary fields
     auto infoIt = top.find("info");
     if (infoIt == top.end() || infoIt->second.getType() != BencodeValue::DICT) {
@@ -233,4 +261,24 @@ TorrentFile TorrentParser::parse(const std::string& filepath) {
     torrent.infoHash = computeInfoHash(raw);
 
     return torrent;
+}
+
+// -----------------------------------------------------------------------------
+// allAnnounceUrls()
+// -----------------------------------------------------------------------------
+// Flatten the tiers into one list. If the torrent has no announce-list, the
+// single `announce` URL is the whole list - that keeps callers from having to
+// special-case "old torrent without multitracker support".
+// -----------------------------------------------------------------------------
+std::vector<std::string> TorrentFile::allAnnounceUrls() const {
+    std::vector<std::string> urls;
+    for (const auto& tier : announceTiers) {
+        for (const auto& url : tier) {
+            urls.push_back(url);
+        }
+    }
+    if (urls.empty() && !announce.empty()) {
+        urls.push_back(announce);
+    }
+    return urls;
 }
