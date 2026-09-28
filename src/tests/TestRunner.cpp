@@ -35,6 +35,7 @@
 #include "torrent/TorrentParser.hpp"
 #include "torrent/TorrentFile.hpp"
 #include "tracker/HttpTracker.hpp"
+#include "tracker/UdpTracker.hpp"
 #include "tracker/TrackerRequest.hpp"
 #include "peer/FakePeer.hpp"
 #include "peer/PeerHandshake.hpp"
@@ -569,6 +570,95 @@ int runTests() {
     // Tracker Tests (Phase 3)
     // -------------------------------------------------------------------------
     std::cout << "\n=== Tracker Tests ===\n\n";
+
+    // ---- BEP 15 golden-byte tests ----------------------------------------
+    // The compact-peer bug above happened because we hand-assembled a number
+    // onto a field that was already in network order. BEP 15 is the same trap
+    // with a sharper edge: a 64-bit magic constant that, written little-endian,
+    // makes the tracker ignore us entirely with no error to diagnose.
+    //
+    // So these tests do not check "does putBE64 round-trip" (it would, either
+    // way). They check the exact bytes against hand-written hex straight from
+    // the spec, which is the only way an endianness mistake gets caught.
+    {
+        uint8_t buf[8];
+        putBE64(buf, 0x41727101980ULL);
+        // Spec bytes: 00 00 04 17 27 10 19 80
+        const uint8_t wantMagic[8] = {0x00, 0x00, 0x04, 0x17, 0x27, 0x10, 0x19, 0x80};
+
+        uint8_t b32[4];
+        putBE32(b32, 0xAABBCCDDu);
+        const uint8_t want32[4] = {0xAA, 0xBB, 0xCC, 0xDD};
+
+        // Compare immediately after each write - reusing one buffer and
+        // checking it afterwards is a trap (a previous version of this test
+        // made exactly that mistake and "failed" for the wrong reason).
+        bool magicOk = true;
+        for (int i = 0; i < 8; i++) magicOk = magicOk && buf[i] == wantMagic[i];
+        bool be32Ok = true;
+        for (int i = 0; i < 4; i++) be32Ok = be32Ok && b32[i] == want32[i];
+
+        bool getOk = getBE64(wantMagic) == 0x41727101980ULL &&
+                     getBE32(want32) == 0xAABBCCDDu;
+
+        if (magicOk && be32Ok && getOk) {
+            std::cout << "PASS: BEP 15 big-endian helpers (magic + 32-bit round-trip)\n";
+            passed++;
+        } else {
+            std::cout << "FAIL: BEP 15 big-endian helpers (magicOk=" << magicOk
+                      << " be32Ok=" << be32Ok << " getOk=" << getOk << ")\n";
+            failed++;
+        }
+    }
+
+    // ---- BEP 15 URL parsing ----------------------------------------------
+    // The path is ignored by the spec, and the default port matters: a
+    // "udp://host/announce" with no port must become 6969, not 0.
+    {
+        struct Case { const char* url; const char* host; uint16_t port; };
+        const Case cases[] = {
+            {"udp://tracker.example:6969/announce", "tracker.example", 6969},
+            {"udp://tracker.example:1337/announce", "tracker.example", 1337},
+            {"udp://tracker.example/announce",      "tracker.example", 6969},
+            {"udp://tracker.example",               "tracker.example", 6969},
+        };
+        bool allOk = true;
+        std::string detail;
+        for (const Case& c : cases) {
+            std::string host;
+            uint16_t port = 0;
+            try {
+                UdpTracker::parseUrl(c.url, host, port);
+                if (host != c.host || port != c.port) {
+                    allOk = false;
+                    detail = std::string(c.url) + " -> " + host + ":" + std::to_string(port);
+                }
+            } catch (const std::exception& e) {
+                allOk = false;
+                detail = std::string(c.url) + " threw: " + e.what();
+            }
+        }
+
+        // A URL with a typo'd port must be rejected, not silently coerced to
+        // some other port - stoi("80abc") happily returns 80.
+        bool rejectsJunk = false;
+        try {
+            std::string host;
+            uint16_t port = 0;
+            UdpTracker::parseUrl("udp://tracker.example:80abc/announce", host, port);
+        } catch (const std::exception&) {
+            rejectsJunk = true;
+        }
+
+        if (allOk && rejectsJunk) {
+            std::cout << "PASS: BEP 15 UDP URL parsing (default port 6969, rejects junk)\n";
+            passed++;
+        } else {
+            std::cout << "FAIL: BEP 15 UDP URL parsing -> " << detail
+                      << " rejectsJunk=" << rejectsJunk << "\n";
+            failed++;
+        }
+    }
 
     // ---- Offline regression test for the compact-peer byte order ----------
     // A real bug lived here once. decodeCompactPeers() built the right IP

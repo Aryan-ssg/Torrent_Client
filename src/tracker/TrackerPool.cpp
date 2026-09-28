@@ -5,6 +5,7 @@
 #include "tracker/TrackerPool.hpp"
 
 #include "tracker/HttpTracker.hpp"
+#include "tracker/UdpTracker.hpp"
 
 #include <algorithm>
 #include <atomic>
@@ -104,9 +105,7 @@ TrackerResponse TrackerPool::announceToUrl(const TrackerRequest& request) {
     const std::string scheme = schemeOf(request.announceUrl);
 
     if (scheme == "udp") {
-        // BEP 15 - filled in by the UDP tracker work. Failing loudly beats
-        // silently returning zero peers and looking like a dead swarm.
-        throw std::runtime_error("UDP tracker support not built yet: " + request.announceUrl);
+        return UdpTracker::announce(request);  // BEP 15
     }
     if (scheme == "http" || scheme == "https" || scheme.empty()) {
         return HttpTracker::announce(request);

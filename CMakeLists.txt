@@ -57,6 +57,7 @@ add_library(peerflow_core STATIC
     src/torrent/TorrentParser.cpp
     src/tracker/TrackerRequest.cpp
     src/tracker/HttpTracker.cpp
+    src/tracker/UdpTracker.cpp
     src/tracker/TrackerPool.cpp
     src/net/TcpSocket.cpp
     src/peer/PeerHandshake.cpp
