@@ -1226,18 +1226,23 @@ int runTests() {
             constexpr int kWorkers = 4;
             const std::string ourId = generatePeerId();
 
-            // Four seeders. Each gets a distinct peer_id; the downloader maps
-            // piece idx -> peers[idx % 4], so every seeder serves the same
-            // number of connections (3 each here) - guaranteed, not lucky.
+            // Four seeders, each with a distinct peer_id. The downloader draws
+            // peers from a shared queue, so which seeder serves which piece is
+            // up to the scheduler - what matters is that every piece is
+            // fetched exactly once and verified.
             FakePeer seeders[kWorkers] = {
                 FakePeer(t.infoHash, "-PF0007-000000000001", content, t.pieceLength),
                 FakePeer(t.infoHash, "-PF0007-000000000002", content, t.pieceLength),
                 FakePeer(t.infoHash, "-PF0007-000000000003", content, t.pieceLength),
                 FakePeer(t.infoHash, "-PF0007-000000000004", content, t.pieceLength)};
-            int piecesPerWorker = (pieceCountFor(kSynPieceLen, k7Total) + kWorkers - 1) / kWorkers;
+            // With connection reuse a worker holds ONE connection and pulls
+            // many pieces over it, so a seeder must be willing to serve
+            // several pieces from a single client. This used to be
+            // piecesPerWorker (one connection per piece) - which is precisely
+            // the behaviour the PeerSession work replaced.
             std::vector<Peer> swarm;
             for (int i = 0; i < kWorkers; i++) {
-                seeders[i].setMaxConnections(piecesPerWorker);
+                seeders[i].setMaxConnections(8);
                 seeders[i].start();
                 Peer p;
                 p.ip = "127.0.0.1";
@@ -1272,15 +1277,39 @@ int runTests() {
                                         std::istreambuf_iterator<char>());
 
             const size_t expected = pieceCountFor(kSynPieceLen, k7Total);
-            if (okRun && totalServed == static_cast<int>(expected) && onDisk == content) {
-                std::cout << "PASS: 4 workers/4 peers fetched all " << expected
-                          << " pieces exactly once each (" << totalServed
-                          << " connections, file byte-verified)\n";
+
+            // The assertion that matters is the SECOND one. Phase 7 used to
+            // open one connection per piece, so 12 pieces meant 12
+            // connections. Connection reuse is the whole point of PeerSession,
+            // and "12 pieces arrived over strictly fewer than 12 connections"
+            // is the regression test that keeps it true: reintroduce a
+            // connect-per-piece path and this fails, even though every byte is
+            // still correct.
+            //
+            // The bound is not the worker count on purpose. A worker whose peer
+            // has been drained of everything we still need legitimately redials
+            // to find one that has not, so a few extra connections are correct
+            // behaviour rather than a regression. What must never come back is
+            // one connection per piece.
+            const bool contentOk = onDisk == content;
+            const bool allPieces = okRun;
+            const bool connectionsReused =
+                totalServed >= 1 && totalServed < static_cast<int>(expected);
+            const int piecesPerConnection =
+                totalServed > 0 ? static_cast<int>(expected) / totalServed : 0;
+
+            if (allPieces && contentOk && connectionsReused) {
+                std::cout << "PASS: 4 workers fetched all " << expected
+                          << " pieces over just " << totalServed
+                          << " connection(s) (" << piecesPerConnection
+                          << " pieces each, file byte-verified)\n";
                 passed++;
             } else {
-                std::cout << "FAIL: parallel correctness (served=" << totalServed
-                          << " expected=" << expected
-                          << " bytesMatch=" << (onDisk == content) << ")\n";
+                std::cout << "FAIL: parallel correctness (pieces ok=" << allPieces
+                          << " bytesMatch=" << contentOk
+                          << " connections=" << totalServed
+                          << " pieces=" << expected
+                          << " reuseRequiresFewerThanPieces=1)\n";
                 failed++;
             }
         }

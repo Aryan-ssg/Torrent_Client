@@ -13,6 +13,7 @@
 #include <unistd.h>        // close
 
 #include <algorithm>       // std::min
+#include <atomic>         // std::atomic (shutdown flag)
 #include <chrono>          // std::chrono::milliseconds (Phase 7 latency)
 #include <thread>          // std::this_thread::sleep_for (Phase 7 latency)
 
@@ -94,8 +95,17 @@ FakePeer::FakePeer(const std::vector<uint8_t>& infoHash, const std::string& serv
       content_(content), pieceLength_(pieceLength), seeder_(true) {}
 
 FakePeer::~FakePeer() {
-    if (listenFd_ >= 0) ::close(listenFd_);
+    // Wake the parked accept() BEFORE closing the descriptor, and join. Doing
+    // it the other way round is the classic bug: close() does not reliably
+    // unblock a thread already sitting in accept(), and the descriptor number
+    // can be recycled, so join() would hang - or the accept would end up
+    // watching a stranger's socket.
+    shutdown();
     if (thread_.joinable()) thread_.join();
+    if (listenFd_ >= 0) {
+        ::close(listenFd_);
+        listenFd_ = -1;
+    }
 }
 
 // =============================================================================
@@ -136,8 +146,11 @@ void FakePeer::start() {
 }
 
 void FakePeer::acceptLoop() {
-    // Serve up to maxConnections_ visitors (Phase 4/5: one; Phase 6: one
-    // per piece). We exit after the last one so join() can return.
+    // Serve up to maxConnections_ visitors. We exit after the last one so
+    // join() can return.
+    //
+    // The shutdown_ check is not decoration: shutdown() wakes a parked
+    // accept() by connecting to ourselves, and this loop has to notice.
     for (int served = 0; served < maxConnections_; served++) {
         struct sockaddr_in clientAddr {};
         socklen_t clen = sizeof(clientAddr);
@@ -145,9 +158,52 @@ void FakePeer::acceptLoop() {
                                 reinterpret_cast<struct sockaddr*>(&clientAddr),
                                 &clen);
         if (clientFd < 0) return;   // listen socket closed (destructor)
+
+        if (shutdown_.load()) {
+            // Woken by shutdown(). Do not talk to the poke; just leave.
+            ::close(clientFd);
+            return;
+        }
+
         handleConnection(clientFd);
         ::close(clientFd);
         servedCount_++;
+    }
+}
+
+// =============================================================================
+// shutdown()
+// =============================================================================
+// Make join() able to return even though the accept thread is parked in
+// accept() waiting for a visitor that will never come.
+//
+// Closing the listening descriptor is NOT enough, and is actually dangerous:
+// on Linux, close() does not reliably wake a thread already blocked in
+// accept(), and the descriptor number can be recycled underneath it, so the
+// accept can end up watching somebody else's socket.
+//
+// The portable way to wake a parked accept() is to give it something to
+// accept: connect to ourselves once, from this same process, on a throwaway
+// socket. accept() returns that connection, the loop sees shutdown_ is set,
+// and exits. The listen socket is only closed afterwards, on a thread that is
+// no longer blocked in it.
+// =============================================================================
+void FakePeer::shutdown() {
+    if (shutdown_.exchange(true)) return;  // already asked to stop
+    if (listenFd_ < 0) return;
+
+    // The wake-up connection. It never completes a handshake - acceptLoop
+    // checks shutdown_ before talking to anyone - so an empty connect is
+    // enough. Ignore the result: a failure here just means the accept was
+    // not actually parked.
+    int waker = ::socket(AF_INET, SOCK_STREAM, 0);
+    if (waker >= 0) {
+        struct sockaddr_in addr {};
+        addr.sin_family = AF_INET;
+        addr.sin_port = htons(port_);
+        addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+        ::connect(waker, reinterpret_cast<struct sockaddr*>(&addr), sizeof(addr));
+        ::close(waker);
     }
 }
 
@@ -263,19 +319,4 @@ void FakePeer::handleSeeder(int clientFd) {
 
 void FakePeer::join() {
     if (thread_.joinable()) thread_.join();
-}
-
-// =============================================================================
-// shutdown()
-// =============================================================================
-// Close the listen socket so a blocked accept() fails and the loop exits.
-// Used when the downloader is DONE talking (e.g. it aborted early) but the
-// peer is still parked awaiting connections that will never arrive; join()
-// can then return instead of hanging forever.
-// =============================================================================
-void FakePeer::shutdown() {
-    if (listenFd_ >= 0) {
-        ::close(listenFd_);
-        listenFd_ = -1;
-    }
 }

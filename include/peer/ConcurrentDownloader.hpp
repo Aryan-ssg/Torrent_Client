@@ -1,49 +1,65 @@
 #pragma once
 
 // =============================================================================
-// ConcurrentDownloader.hpp - Download ALL pieces using several peers at once
+// ConcurrentDownloader.hpp - Download ALL pieces using many peers at once
 // =============================================================================
 //
-// Phases 5–6 were strictly SEQUENTIAL: fetch one piece, wait, write it, fetch
-// the next. That's like a single waiter carrying one plate at a time. Phase 7
-// makes the download parallel, the way real clients work:
+// Phases 5-6 were strictly sequential (fetch one piece, write it, next), and
+// Phase 7 made it parallel by giving each worker a fresh connection per piece.
+// That still made 23,664 connections for a 6 GB ISO, which no real swarm
+// survives for long.
 //
-//   - spawn N WORKER THREADS (imagine N waiters)
-//   - each worker loops:
-//       1. ask the PieceManager for the next PENDING piece
-//       2. claim it, so no other worker fetches the same piece
-//       3. ask ONE peer from our peer list for it (handshake -> interested ->
-//          request blocks -> SHA-1 verified)
-//       4. store it with the manager (it re-verifies before touching disk)
-//   - if a download fails, the piece is RELEASED back to PENDING so another
-//     worker can retry it
+// This version keeps one PeerSession per worker alive and moves many pieces
+// over it, which is what real clients do. The scheduling is now shaped by
+// what peers actually have:
 //
-// The peer for step 3 is picked as peers[pieceIndex % peers.size()], so the
-// swarm is load-balanced by construction: piece 0 -> peer 0, piece 1 -> peer
-// 1, ... (Real clients pick a peer per piece, roughly this way, so no single
-// peer ends up carrying all the work if the claim races hand one worker most
-// of the pieces.) Each peer is dialed over its own TCP connection, so the
-// fake seeders in the test run truly in parallel - which is exactly what the
-// Phase 7 timing test measures.
+//   - each worker owns a session with ONE peer, and that peer's bitfield
+//     decides which pieces are worth asking for;
+//   - when the peer's remaining pieces are claimed or owned, the worker
+//     redials and picks a different peer;
+//   - a claim that stops making progress is reclaimed after a timeout, so one
+//     unresponsive peer cannot strand the last few pieces.
 //
-// (Real clients take parallelism one level further: for big pieces they split
-// ONE piece into blocks and fetch different blocks from different peers. Our
-// synthetic pieces are 16 KiB - one block each - so piece-per-worker is the
-// full picture here; block-level parallelism is the obvious next refinement
-// for 256 KiB pieces like Ubuntu's.)
-//
-// Java parallel: ExecutorService with a pool of threads, each thread doing
-// next-piece / claim / fetch / store against a thread-safe PieceManager
-// (like ConcurrentHashMap guarding the completed-chunks tracker).
+// PROGRESS REPORTING
+// ------------------
+// Workers never call the progress callback directly. They only bump a handful
+// of atomics; a single reporter thread snapshots them on a timer and invokes
+// the callback. That matters for two reasons: per-worker throttling does not
+// give a global 10 Hz (N workers each at 10 Hz is 10N), and a callback that
+// draws to a terminal must not be entered from several threads at once.
+// Invoking it from one thread also means the UI needs no lock of its own.
 // =============================================================================
 
 #include "piece/PieceManager.hpp"
 #include "torrent/TorrentFile.hpp"
 #include "tracker/Peer.hpp"
 
-#include <cstddef>     // For size_t
-#include <string>      // For std::string
-#include <vector>      // For std::vector
+#include <atomic>
+#include <cstddef>
+#include <cstdint>
+#include <functional>
+#include <string>
+#include <vector>
+
+// A snapshot of the download's state, handed to the progress callback on a
+// single reporting thread.
+struct DownloadProgress {
+    long long bytesDone = 0;
+    long long bytesTotal = 0;
+    size_t piecesDone = 0;
+    size_t piecesTotal = 0;
+    int peersConnected = 0;   // sessions currently usable
+    int peersTried = 0;       // distinct peers dialled so far
+    bool finished = false;
+    bool failed = false;
+    std::string error;
+
+    double fraction() const {
+        if (bytesTotal <= 0) return 0.0;
+        double f = static_cast<double>(bytesDone) / static_cast<double>(bytesTotal);
+        return f < 0.0 ? 0.0 : (f > 1.0 ? 1.0 : f);
+    }
+};
 
 class ConcurrentDownloader {
 public:
@@ -54,13 +70,18 @@ public:
         size_t piecesDownloaded = 0;  // how many storePiece() calls succeeded
     };
 
+    using ProgressCallback = std::function<void(const DownloadProgress&)>;
+
     // Download `torrent` into `outputPath` using up to `workerCount` parallel
     // workers spread across `peers`. Blocks until all pieces are fetched (or
-    // a worker gives up after repeated failures and aborts the run).
+    // the run aborts). `onProgress`, if given, is called from ONE dedicated
+    // thread at roughly 10 Hz and must be safe to call without extra locking.
     static Result download(const TorrentFile& torrent,
                            const std::vector<Peer>& peers,
                            const std::string& outputPath,
                            const std::string& ourPeerId,
                            int workerCount,
-                           int timeoutSeconds);
+                           int timeoutSeconds,
+                           ProgressCallback onProgress = nullptr,
+                           std::atomic<bool>* abortFlag = nullptr);
 };

@@ -24,6 +24,7 @@
 #include <cstdint>   // For uint16_t, size_t
 #include <limits>    // For std::numeric_limits
 #include <string>    // For std::string
+#include <atomic>
 #include <thread>    // For std::thread
 #include <vector>    // For std::vector
 
@@ -81,6 +82,7 @@ private:
 
     std::vector<uint8_t> infoHash_;  // the torrent we pretend to serve
     std::string serverPeerId_;       // the peer_id we announce with
+    std::atomic<bool> shutdown_{false};
     int listenFd_ = -1;
     uint16_t port_ = 0;
     int accepted_ = 0;

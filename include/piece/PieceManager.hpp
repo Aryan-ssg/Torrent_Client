@@ -36,8 +36,10 @@
 // download threads can claim different chunks without duplicating work.
 // =============================================================================
 
+#include "peer/Bitfield.hpp"
 #include "torrent/TorrentFile.hpp"
 
+#include <chrono>
 #include <cstddef>     // For size_t
 #include <cstdint>     // For uint8_t
 #include <fstream>     // For std::fstream
@@ -51,11 +53,28 @@ public:
     // lifecycle of one piece:
     //   PENDING -> CLAIMED -> OWNED          (normal download)
     //   PENDING -> CLAIMED -> PENDING        (worker failed: try again later)
+    //   CLAIMED -> PENDING                   (claim timed out: slow peer)
     enum class State {
         kPending = 0,  // not fetched yet
         kClaimed,      // a download worker is fetching it right now
         kOwned         // verified SHA-1 AND written to disk
     };
+
+    // Proof that YOU are the worker holding a claim.
+    //
+    // This exists because of stuck-claim reclaim. A worker can be talking to a
+    // peer that has stopped responding but whose socket has not yet timed out;
+    // long after the piece is handed to somebody else, the slow worker may
+    // come back with a perfectly valid piece. Without a token it would happily
+    // write it - possibly for a piece that a second worker has since
+    // re-downloaded, or dropped the piece back to PENDING. Passing the token
+    // to storePiece() makes "is my claim still mine?" a single comparison
+    // under the lock, so a stale worker is turned away instead of racing.
+    //
+    // Java parallel: like a version stamp, or an AtomicLong you compare before
+    // writing, so a slow thread cannot clobber a newer writer.
+    using ClaimToken = uint64_t;
+    static constexpr ClaimToken kNoClaim = 0;
 
     // torrent: the metadata (piece length, hashes, total size).
     // outputPath: where the completed file will live.
@@ -74,12 +93,17 @@ public:
     bool hasPiece(size_t index) const;
 
     // The index of the next PENDING piece, or kNotFound if none.
-    // (CLAIMED pieces are skipped: someone is already fetching them.)
-    size_t nextPieceToFetch() const;
+    //
+    // `peerHas`, when given, restricts the search to pieces that peer owns.
+    // Without this a downloader blindly asks peer 0 for pieces 0, N, 2N... and
+    // blocks forever whenever peer 0 does not own one of them - which, in any
+    // real swarm, is most of them.
+    size_t nextPieceToFetch(const Bitfield* peerHas = nullptr) const;
 
     // Worker protocol: atomically mark a PENDING piece as CLAIMED so no other
-    // worker picks it. Returns false if someone else already claimed/owned it.
-    bool claimPiece(size_t index);
+    // worker picks it. Returns kNoClaim if someone else already claimed or
+    // owns it. The returned token must be passed to storePiece().
+    ClaimToken claimPiece(size_t index);
 
     // Undo a claim (the download failed). The piece goes back to PENDING so
     // another worker can retry it later.
@@ -88,7 +112,26 @@ public:
     // Verify SHA-1 against the torrent AND write at the right offset.
     // Returns false if the hash didn't match (nothing marked, nothing written).
     // On success the piece becomes OWNED (its claim is resolved).
-    bool storePiece(size_t index, const std::vector<uint8_t>& bytes);
+    //
+    // If `token` is not kNoClaim, it must be the token this worker received
+    // from claimPiece(); if the claim has since been reclaimed by a watchdog
+    // or by another worker, the write is refused. That is what stops a slow
+    // worker's late arrival from corrupting a piece someone else has finished.
+    bool storePiece(size_t index, const std::vector<uint8_t>& bytes,
+                    ClaimToken token = kNoClaim);
+
+    // Re-claim a piece whose worker has stopped making progress, so a single
+    // slow peer cannot stall the tail of a download forever. Returns kNoClaim
+    // if the piece is not actually stuck, or someone else took it first.
+    //
+    // `stuckAfter` is how long a claim may stand untouched. Pieces are only
+    // reclaimed from workers that are demonstrably not finishing, never from
+    // one that is merely slow.
+    ClaimToken reclaimStuckPiece(std::chrono::seconds stuckAfter);
+
+    // Touch a claim's clock - called as a piece's blocks arrive, so an
+    // in-progress download is never mistaken for a stalled one.
+    void heartbeatClaim(ClaimToken token);
 
     // Resume: re-read the output file and mark every piece whose data on
     // disk hashes correctly. Corrupted pieces simply stay "not owned".
@@ -96,6 +139,10 @@ public:
 
     // The output file we are writing (handy for tests that inspect/corrupt).
     const std::string& path() const { return outputPath_; }
+
+    // Total bytes on disk once finished - what the progress bar measures
+    // against. Cached, because the UI asks for it on every repaint.
+    long long totalBytes() const { return fullLength_; }
 
     // Sentinel for "no next piece" (same trick as std::string::npos).
     static constexpr size_t kNotFound = static_cast<size_t>(-1);
@@ -108,8 +155,15 @@ private:
                                  // accessed only while holding mutex_)
     size_t fullLength_ = 0;      // torrent_.length, cached for clarity
 
-    // Guards states_. Phase 7 reads and writes it from several worker threads
-    // at once; every access must hold this. (The rest of the object is
-    // immutable after construction and needs no locking.)
+    // Per-piece claim bookkeeping, indexed the same way as states_ (both
+    // guarded by mutex_). nextClaim_ is a monotonically increasing counter so
+    // every claim gets a distinct token.
+    std::vector<ClaimToken> claimTokens_;
+    std::vector<std::chrono::steady_clock::time_point> claimTimes_;
+    ClaimToken nextClaim_ = 1;
+
+    // Guards states_, claimTokens_ and claimTimes_. Phase 7 reads and writes
+    // them from several worker threads at once; every access must hold this.
+    // (The rest of the object is immutable after construction.)
     mutable std::mutex mutex_;
 };

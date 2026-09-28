@@ -51,6 +51,8 @@ PieceManager::PieceManager(const TorrentFile& torrent, const std::string& output
     // Everything starts PENDING (not yet fetched).
     size_t n = torrent_.pieces.size() / 20;
     states_.assign(n, State::kPending);
+    claimTokens_.assign(n, kNoClaim);
+    claimTimes_.assign(n, std::chrono::steady_clock::time_point{});
 
     if (n == 0) {
         throw FileException("Torrent has zero pieces");
@@ -103,32 +105,88 @@ bool PieceManager::hasPiece(size_t index) const {
     return index < states_.size() && states_[index] == State::kOwned;
 }
 
-size_t PieceManager::nextPieceToFetch() const {
+size_t PieceManager::nextPieceToFetch(const Bitfield* peerHas) const {
     std::lock_guard<std::mutex> lock(mutex_);
     for (size_t i = 0; i < states_.size(); i++) {
-        if (states_[i] == State::kPending) return i;
+        if (states_[i] != State::kPending) continue;  // claimed or already ours
+        // Only offer pieces this peer actually has. Asking for a piece the
+        // peer does not own is not an error, it is a stall: the request sits
+        // unanswered until our read timeout fires, and one such piece is
+        // enough to make a whole worker look hung.
+        if (peerHas != nullptr && !peerHas->has(i)) continue;
+        return i;
     }
     return kNotFound;
 }
 
-bool PieceManager::claimPiece(size_t index) {
+PieceManager::ClaimToken PieceManager::claimPiece(size_t index) {
     std::lock_guard<std::mutex> lock(mutex_);
     if (index >= states_.size() || states_[index] != State::kPending) {
-        return false;   // already claimed by another worker, or already owned
+        return kNoClaim;  // already claimed by another worker, or already owned
     }
     states_[index] = State::kClaimed;
-    return true;
+
+    // A fresh token per claim. Monotonic rather than random so "newer than
+    // mine" is a comparable quantity, and so a token can never be reused
+    // within a process.
+    const ClaimToken token = nextClaim_++;
+    claimTokens_[index] = token;
+    claimTimes_[index] = std::chrono::steady_clock::now();
+    return token;
 }
 
 void PieceManager::releasePiece(size_t index) {
     std::lock_guard<std::mutex> lock(mutex_);
     if (index < states_.size() && states_[index] == State::kClaimed) {
         states_[index] = State::kPending;  // available for someone else to retry
+        claimTokens_[index] = kNoClaim;
     }
 }
 
-bool PieceManager::storePiece(size_t index, const std::vector<uint8_t>& bytes) {
+PieceManager::ClaimToken PieceManager::reclaimStuckPiece(std::chrono::seconds stuckAfter) {
     std::lock_guard<std::mutex> lock(mutex_);
+    const auto now = std::chrono::steady_clock::now();
+    for (size_t i = 0; i < states_.size(); i++) {
+        if (states_[i] != State::kClaimed) continue;
+        if (now - claimTimes_[i] < stuckAfter) continue;
+
+        // Reclaim it. The previous holder's token is NOT cleared to kNoClaim
+        // - it is replaced with a new one, so the old holder's storePiece()
+        // fails its token check and is turned away. That is the whole point:
+        // without it, a slow-but-eventually-valid answer would overwrite a
+        // piece somebody else has already finished.
+        states_[i] = State::kPending;
+        const ClaimToken token = nextClaim_++;
+        claimTokens_[i] = token;
+        claimTimes_[i] = now;
+        return token;  // the caller now owns this piece instead
+    }
+    return kNoClaim;
+}
+
+void PieceManager::heartbeatClaim(ClaimToken token) {
+    if (token == kNoClaim) return;
+    std::lock_guard<std::mutex> lock(mutex_);
+    for (size_t i = 0; i < claimTokens_.size(); i++) {
+        if (claimTokens_[i] == token) {
+            claimTimes_[i] = std::chrono::steady_clock::now();
+            return;
+        }
+    }
+}
+
+bool PieceManager::storePiece(size_t index, const std::vector<uint8_t>& bytes,
+                             ClaimToken token) {
+    std::lock_guard<std::mutex> lock(mutex_);
+
+    // "Is this still my claim?" - checked before anything else, and under the
+    // same lock that performs the state change below, so a reclaim happening
+    // concurrently cannot slip in between the test and the write.
+    if (token != kNoClaim) {
+        if (index >= claimTokens_.size() || claimTokens_[index] != token) {
+            return false;  // reclaimed by a watchdog or another worker: drop it
+        }
+    }
 
     if (index >= states_.size()) return false;
 
