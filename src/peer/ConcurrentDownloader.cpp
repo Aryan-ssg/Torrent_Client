@@ -12,6 +12,7 @@
 #include <chrono>
 #include <condition_variable>
 #include <deque>
+#include <fstream>
 #include <mutex>
 #include <random>
 #include <set>
@@ -48,7 +49,8 @@ ConcurrentDownloader::Result ConcurrentDownloader::download(
     int workerCount,
     int timeoutSeconds,
     ProgressCallback onProgress,
-    std::atomic<bool>* abortFlag) {
+    std::atomic<bool>* abortFlag,
+    bool resume) {
 
     Result result;
 
@@ -74,8 +76,34 @@ ConcurrentDownloader::Result ConcurrentDownloader::download(
     }
 
     // ---- Shared state ----------------------------------------------------
+    //
+    // RESUME. If a file is already sitting at the output path, work out what
+    // it actually contains before assuming we need all of it. scanDisk()
+    // re-hashes every piece and marks the ones that match, which is the only
+    // honest way to know - "the file is the right size" proves nothing, since
+    // a half-written or corrupted file is exactly the case resume exists for.
+    //
+    // The size check first matters for cost: hashing a freshly preallocated
+    // 6 GB file that is all zeros would read 6 GB to learn what we already
+    // know, so we only scan when there was a pre-existing file.
+    bool hadExistingFile = false;
+    {
+        std::ifstream probe(outputPath, std::ios::binary | std::ios::ate);
+        if (probe) {
+            const auto sizeOnDisk = static_cast<long long>(probe.tellg());
+            hadExistingFile = sizeOnDisk > 0 && sizeOnDisk <= torrent.length;
+        }
+    }
+
     PieceManager manager(torrent, outputPath);
     const size_t pieceCount = manager.pieceCount();
+
+    if (resume && hadExistingFile) {
+        manager.scanDisk();
+        // scanDisk only marks pieces whose SHA-1 matches, so anything it did
+        // not recover is genuinely missing or damaged and will be refetched.
+    }
+
 
     // Our own abort flag, ORed with any the caller supplied. Using one object
     // means the workers do not need to know which of the two exists.
@@ -99,6 +127,25 @@ ConcurrentDownloader::Result ConcurrentDownloader::download(
     // deciding to back off, so a worker with nothing to do does not idle while
     // the rest of the run is making progress.
     std::atomic<long long> lastProgressMillis{0};
+
+    // Baseline the progress counters at what was RECOVERED, not at zero.
+    //
+    // These counters drive the progress bar, and the bar is meant to describe
+    // the file, not this particular run. On a resume where 90% of the pieces
+    // were already on disk, starting the bar at 0% is a lie - and the first
+    // frame even says "0 B / 5.8 GiB" for a file that is 5.8 GiB and already
+    // verified.
+    {
+        long long recoveredBytes = 0;
+        const Bitfield state = manager.pieceState();
+        for (size_t i = 0; i < pieceCount; i++) {
+            if (state.has(i)) {
+                recoveredBytes += static_cast<long long>(manager.pieceLength(i));
+            }
+        }
+        bytesDone.store(recoveredBytes);
+        piecesDone.store(manager.completedCount());
+    }
 
     lastProgressMillis.store(
         std::chrono::duration_cast<std::chrono::milliseconds>(

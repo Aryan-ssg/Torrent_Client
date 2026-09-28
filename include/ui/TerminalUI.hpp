@@ -81,7 +81,19 @@ private:
     bool finished_ = false;
 
     int linesDrawnLast_ = 0;   // how many rows the last frame occupied
-    int lastPercent_ = -1;     // only redraw a line-mode line when it changes
+    uint64_t lastLineMs_ = 0;   // when line mode last printed
+    bool finalLinePrinted_ = false;  // the 100% line is emitted once, not per tick
+    static constexpr uint64_t kLineIntervalMs = 1000;  // one line per second
+
+    // The newest progress snapshot, so finish() can report what actually
+    // happened instead of a caller-guessed struct full of zeros.
+    DownloadProgress last_{};
+    bool haveLast_ = false;
+
+    // When this object was created, so the final summary can report elapsed
+    // time and average throughput.
+    std::chrono::steady_clock::time_point startedAt_{
+        std::chrono::steady_clock::now()};
 
     std::deque<std::string> logLines_;
     static constexpr size_t kMaxLogLines = 6;

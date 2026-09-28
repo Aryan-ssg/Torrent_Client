@@ -87,5 +87,6 @@ public:
                            int workerCount,
                            int timeoutSeconds,
                            ProgressCallback onProgress = nullptr,
-                           std::atomic<bool>* abortFlag = nullptr);
+                           std::atomic<bool>* abortFlag = nullptr,
+                           bool resume = true);
 };
