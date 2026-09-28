@@ -204,15 +204,40 @@ an annoyance, not a catastrophe — **try the next one**. (The Java habit
 per-peer facts, a returned verdict is checkable; exceptions are for *our*
 programming errors.)
 
-## The FakePeer: proving it works without the internet
+## The FakePeer: testing without a swarm (and a bug it helped us find)
 
-Here's the honest problem we hit on this machine:
+`FakePeer` exists because a real swarm is an unreliable place to prove
+correctness: trackers hand out plenty of peers that are offline, firewalled,
+or uTP-only, so "0 handshakes" says almost nothing. **Loopback (the virtual
+address `127.0.0.1` — "this very machine", where traffic never leaves the box
+and is never firewall-filtered)** gives us the full TCP experience on demand,
+repeatably.
 
-> **The firewall only lets us reach ports ~80/443. Tracker peers listen on
-> random ports (6881, 51413, …), and every connection attempt was silently
-> dropped** — we verified even `1.1.1.1:6881` times out. So real-swarm
-> handshakes can't complete *from this network*, no matter how correct our
-> code is.
+> ### The bug this shook out
+>
+> For a long time the real-network sweep reported `0/50`, and we blamed the
+> machine's firewall — even citing `1.1.1.1:6881` timing out (a useless
+> probe: nothing listens there). That excuse was wrong, and the real cause was
+> a bug our *own* test was blind to.
+>
+> `decodeCompactPeers()` in Phase 3 was building the right IP number with bit
+> shifts and then assigning it to `in_addr::s_addr` — a field that is **already
+> stored in network byte order**. That double-converted every address, so the
+> tracker returned `58.219.119.153` and we dialled **`153.119.219.58`**. The
+> *port* was still correct, which is what made the bug so slippery: the data
+> looked entirely plausible.
+>
+> Two things hid it. Our tracker test only *counted* the 50 peers and never
+> checked that an address made sense, and every loopback test uses `127.0.0.1`
+> by construction, so it bypassed the decoder completely. It surfaced only when
+> someone compared our decoded peers against a reference decoder and noticed
+> they were byte-reversed. The fix is one line — the wire bytes are already in
+> network order, so copy them in — and there is now an offline regression test
+> pinning the exact bytes down.
+>
+> **The lesson:** "the network is blocking us" is a claim you have to *earn*.
+> A passing test is not evidence that a feature works, only that your
+> assertions were satisfiable.
 
 The professional answer: **build a fake peer on your own computer and test
 against it.** **Loopback (the virtual network address `127.0.0.1` — literally
@@ -404,29 +429,53 @@ resolving properly.
 ## The real test output
 
 ```
+=== Tracker Tests ===
+
+Peers found:   50
+  180.112.17.2:20003
+  180.113.101.148:20010
+  185.191.239.157:51413
+  ...
+PASS: tracker announce succeeded
+
 === Peer Handshake Tests ===
 
-Trying to handshake with up to 25 peers...
-Handshake failed with 191.166.219.106:6881: Could not connect to ...
-... (all real swarm peers unreachable from this network) ...
+Trying to handshake with up to 80 peers (timeout 10s each)...
 
-Handshakes OK: 0/25
+Handshake OK with 180.112.17.2:20003, peer_id = 67-a501-4b6dc320f29d
+Handshake OK with 180.113.101.148:20010, peer_id = d1-ad9c-b0e0f035cef5
+Handshake OK with 114.223.185.178:20078, peer_id = 9e-b697-0abf5020df15
+Handshake OK with 108.234.53.168:16881, peer_id = -TR4050-dfntoz6bwkln
+Handshake OK with 106.105.24.135:30679, peer_id = -qB5230-qVA_0E*6w99C
+... (qBittorrent, Transmission, and other real clients in the wild) ...
+Handshake failed with 197.203.150.169:32207: Could not connect (Connection refused)
+... (dead or firewalled peers - normal in any swarm) ...
+
+Handshakes OK: 15/50
+
+PASS: connected to at least one real peer
 
 --- Deterministic loopback test (FakePeer) ---
-Handshake OK with 127.0.0.1:35485, peer_id = -PF0001-000000000000
+Handshake OK with 127.0.0.1:46847, peer_id = -PF0001-000000000000
 
 PASS: loopback handshake verified (68-byte layout + info_hash check)
 
-Passed: 20
+=== Results ===
+Passed: 35
 Failed: 0
 ```
 
 Reading the two halves:
 
-1. **Real-swarm attempts prove the *failure* path** works: 25 unreachable
-   peers, 25 clean one-line reports — no hang, no crash. That graceful
-   degradation is exactly the production behaviour a client must have when it
-   meets the real (partly-dead) internet.
+1. **Real-swarm attempts now succeed.** After the byte-order fix, a real
+   announce plus a real handshake gets us genuine peers on the public
+   internet — including qBittorrent and Transmission. The remaining failures
+   are dead or firewalled peers, which is the normal state of any swarm.
+2. **The failure path still works.** Every dead peer produces one clean
+   one-line report — no hang, no crash. That graceful degradation is exactly
+   the production behaviour a client must have. (Getting there *promptly* is
+   why `TcpSocket::connect()` needed a real timeout: `SO_RCVTIMEO` never
+   applied to `connect()` at all.)
 2. **The loopback handshake proves the *success* path**: correct 68-byte
    construction, correct `recvExact`, correct info_hash acceptance, correct
    peer_id extraction. `-PF0001-000000000000` is the ID the fake peer announced

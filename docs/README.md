@@ -28,7 +28,7 @@ reference while browsing the code.
 | [07 – Phase 5: Messages + pieces](07-phase5-messages.md) | The length-prefixed wire protocol and downloading one verified piece | keep-alives, message ids, REQUEST/PIECE payloads, the SHA-1 gate |
 | [08 – Phase 6: Pieces to disk](08-phase6-pieces.md) | Owning every piece, writing a file, resume | the ownership map, `storePiece()`, `scanDisk()`, "never trust the disk either" |
 | [09 – Phase 7: Parallel downloads](09-phase7-concurrency.md) | Many workers, many peers, real speed | threads, claim/release, atomic abort, load-balancing peers, the speedup test |
-| [10 – Reference](10-reference.md) | Everything reusable + the full file map + the test suite | our `TcpSocket`, exceptions, "never trust the network", all 34 tests |
+| [10 – Reference](10-reference.md) | Everything reusable + the full file map + the test suite | our `TcpSocket`, exceptions, "never trust the network", all 35 tests |
 
 ## Where the actual code lives
 

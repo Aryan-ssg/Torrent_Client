@@ -340,8 +340,11 @@ static void testDepthLimit() {
 // =============================================================================
 // PHASE 5 TEST SCENARIO: a small SYNTHETIC torrent we generate in memory
 // =============================================================================
-// Real peers are unreachable from this machine (firewall), so to prove the
-// piece-download pipeline we build a tiny torrent ourselves:
+// Real peers ARE reachable (Phase 4 proves it against the live swarm), but
+// they are not *controllable*: a real swarm will not hand us a deliberately
+// corrupted piece or a wrong-size block on demand. So to prove the
+// piece-download pipeline deterministically, we build a tiny torrent and seed
+// it ourselves:
 //
 //   - piece length 16384 bytes (like real torrents)
 //   - file length  37768 bytes (= 2 full pieces + one 5000-byte last piece,
@@ -734,9 +737,11 @@ int main() {
     // -------------------------------------------------------------------------
     // Deterministic loopback handshake (FakePeer)
     // -------------------------------------------------------------------------
-    // The machine's firewall blocks outgoing peer ports, so real-swarm
-    // handshakes may always fail here. This test proves PeerHandshake is
-    // correct against a local peer that strictly follows the protocol.
+    // The live sweep above talks to real peers, but a real swarm is a
+    // nondeterministic place to assert on: roughly half its peers are dead at
+    // any moment, and it will never do what we ask on cue. This test proves
+    // PeerHandshake correct against a local peer that strictly follows the
+    // protocol - deterministically, every single run.
     // -------------------------------------------------------------------------
     std::cout << "\n--- Deterministic loopback test (FakePeer) ---\n";
 

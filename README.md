@@ -3,7 +3,7 @@
 PeerFlow is a BitTorrent client built **from scratch in C++17**, one layer at a
 time, with every line written and explained — no magic, no hidden frameworks.
 
-Current milestone: **34/34 tests passing** through Phase 7 (parallel
+Current milestone: **35/35 tests passing** through Phase 7 (parallel
 downloads across many peers; hardened parser against overflow + runaway
 nesting).
 
@@ -19,7 +19,7 @@ nesting).
 | 1 | Bencode decoder | ✅ |
 | 2 | Torrent parser + info hash | ✅ |
 | 3 | Tracker announce, get peers | ✅ — real HTTPS tracker: `Peers found: 50` |
-| 4 | Peer handshake | ✅ — verified on loopback; this network blocks peer ports |
+| 4 | Peer handshake | ✅ — real internet peers (15/50 handshakes: qBittorrent, Transmission, …) plus a deterministic loopback proof |
 | 5 | Messages + downloading a verified piece | ✅ — loopback seeder: request 16 KiB blocks, assemble, SHA-1 verify |
 | 6 | Piece manager + disk + resume | ✅ — fetch all pieces, verify + write at correct offset, `scanDisk()` resume |
 | 7 | Concurrency (many peers) | ✅ — N worker threads share a mutex-guarded PieceManager; claim states stop duplicate downloads; work spread across peers per piece; 8 pieces in ~250 ms vs ~960 ms sequential |
@@ -38,7 +38,7 @@ nesting).
 ```bash
 cmake -B build
 cmake --build build
-./build/peerflow          # runs all 34 tests, prints PASS/FAIL + results
+./build/peerflow          # runs all 35 tests, prints PASS/FAIL + results
 ```
 
 Requires: a C++17 compiler, CMake ≥ 3.14, OpenSSL. (Similar to `mvn package`
@@ -70,7 +70,8 @@ Torrent_Client/
 - ✅ Real HTTPS tracker announce (DNS, TCP, TLS, HTTP, redirects, compact
   peers) against `tracker.opentrackr.org`
 - ✅ 68-byte peer handshake with `recvExact` streaming reads, timeouts, and
-  info-hash verification — proven against a loopback `FakePeer`
+  info-hash verification — proven against real internet peers *and* a
+  deterministic loopback `FakePeer`
 - ✅ Peer wire messages (length-prefixed) + a full **piece download**: request
   16 KiB blocks, assemble them, SHA-1 the result against the torrent's piece
 hashes — verified on a loopback seeder, including the shorter final piece
@@ -93,10 +94,17 @@ hashes — verified on a loopback seeder, including the shorter final piece
 
 ## Known environment notes
 
-- `torrent.ubuntu.com` restricts by IP range and rejects this machine.
-- This network's firewall allows only a few outbound ports (80/443), so
-  arbitrary peer ports (6881, 51413, …) are unreachable — which is why Phases
-  4–7 tests run against local fake peer/seeders on `127.0.0.1`.
+- `torrent.ubuntu.com` restricts by IP range and rejects this machine, so the
+  Phase 3 test announces to `tracker.opentrackr.org` over HTTPS instead (real
+  clients do exactly this — they carry a list of trackers and fall through).
+- Real peers **are** reachable now: a live announce plus a real handshake
+  connects to genuine peers on the public internet (qBittorrent, Transmission
+  and others). Roughly half of a swarm is dead or firewalled at any moment, so
+  the sweep tries up to 80 peers and stops at the first success.
+- Phases 5–7 still test against local fake peers/seeders on `127.0.0.1`. That
+  is deliberate, not a limitation: loopback runs are deterministic and let us
+  inject a corrupted piece, a wrong hash, or a slow link on demand — things a
+  real swarm will not do for us.
 
 ## Roadmap
 

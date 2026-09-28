@@ -11,7 +11,7 @@ Every phase that talks to the internet uses this class:
 
 | Method | What it guarantees |
 |---|---|
-| `connect(host, port, timeout)` | DNS lookup + dial, tries every address, never hangs (timeout) |
+| `connect(host, port, timeout)` | DNS lookup + dial, tries every address, honours the timeout (non-blocking `connect()` + `poll()` + `SO_ERROR`) |
 | `sendAll(data, len)` | loops until the OS accepted *all* bytes |
 | `recvExact(data, len)` | loops until exactly `len` bytes arrive (handles the TCP stream) |
 | `recvSome(data, len)` | one receive attempt: >0 bytes, 0 = close, -1 = error/timeout |
@@ -22,6 +22,17 @@ objects closing one socket = disaster). Moves are allowed — the object hands t
 resource to a new owner. (RAII = "Resource Acquisition Is Initialization": the
 object's constructor acquires a resource and its destructor guarantees it
 releases it, so leaks are impossible by construction.)
+
+**Why `connect()` is non-blocking.** `SO_RCVTIMEO` / `SO_SNDTIMEO` look like
+they should bound a connect, and it is a natural mistake to assume they do. On
+Linux they apply to `send()` / `recv()` **only** — never to `connect()`. A
+plain blocking `connect()` to a black-holed peer therefore sits in the kernel
+for the whole SYN-retry window (~130s at the default `tcp_syn_retries=6`) no
+matter what timeout you asked for, and one bad sweep can take an hour. So:
+switch the socket to `O_NONBLOCK`, let `connect()` return `EINPROGRESS`,
+`poll()` for `POLLOUT` against our own deadline, then read `SO_ERROR` to learn
+the real verdict (writable ≠ succeeded), and finally restore blocking mode for
+the `send`/`recv` calls that follow.
 
 ### Exceptions — our two error languages
 
@@ -55,7 +66,7 @@ Every phase applies these in code:
 | `CMakeLists.txt` | build config: what to compile, what libraries to link (like `pom.xml`) |
 | `README.md` | the short front-door description |
 | **Tests** | |
-| `src/main.cpp` | the test runner: 34 checks that print PASS/FAIL |
+| `src/main.cpp` | the test runner: 35 checks that print PASS/FAIL |
 | **Phase 1 — bencode** | |
 | `include/bencode/BencodeValue.hpp` | the tagged-union value (label + one of four shapes) |
 | `include/bencode/BencodeDecoder.hpp` | the parser: parse/dispatch methods, static `decode()` |
@@ -122,7 +133,7 @@ Every phase applies these in code:
 ```bash
 cmake -B build          # configure
 cmake --build build     # compile
-./build/peerflow        # run all 34 tests
+./build/peerflow        # run all 35 tests
 ```
 
 A completely clean rebuild (if things ever feel stale):
@@ -138,7 +149,7 @@ Phase 0  Setup & tools         ✅ done
 Phase 1  Bencode decoder       ✅ done  (16 tests)
 Phase 2  Torrent parser        ✅ done  (info hash verified)
 Phase 3  Tracker announce      ✅ done  (Peers found: 50)
-Phase 4  Peer handshake        ✅ done  (loopback proof; real peers blocked by firewall here)
+Phase 4  Peer handshake        ✅ done  (real peers: 15/50 handshakes, plus a loopback proof)
 Phase 5  Messages + pieces     ✅ done  (loopback seeder: 3 pieces downloaded & SHA-1 verified,
                                         corrupted piece rejected)
 Phase 6  Piece manager + disk  ✅ done  (8-piece synthetic file downloaded to disk and
@@ -147,7 +158,7 @@ Phase 6  Piece manager + disk  ✅ done  (8-piece synthetic file downloaded to d
                                         nesting-depth caps))
 Phase 7  Many peers            ✅ done  (4 workers + 4 seeders: 12 pieces fetched with exactly
                                         12 connections - claim stops duplicate work; timing
-                                        test shows ~4x speedup; 34 tests total)
+                                        test shows ~4x speedup; 35 tests total)
 Phase 8  Upload / seeding      ⬜ listening + tit-for-tat
 Phase 9  Extras                ⬜ magnet links, UDP trackers, DHT
 ```

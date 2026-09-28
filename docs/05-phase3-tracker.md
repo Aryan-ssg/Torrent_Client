@@ -431,14 +431,23 @@ This phase confronted us with reality — worth remembering:
    crashing), which is exactly what a correct client does.
 2. **`tracker.opentrackr.org` works over HTTPS.** It answered with
    `complete=48, incomplete=2, interval=3502, peers=<N×6 bytes>`.
-3. **This machine's firewall limits outbound ports.** A plain TCP connection
-   to `1.1.1.1:6881` **silently times out** (the SYN packet is *dropped* —
-   "filtered", not "refused"), while `:443` and `:53` work fine. Filtered vs.
-   refused is an important distinction: a *refused* connection sends you an
-   explicit "no" (`RST`); a *filtered* one just swallows your packets and
-   leaves you waiting (hello, timeouts from Layer 3). This restriction blocks
-   real peer connections (Phase 4) — which is why Phase 4's tests run against
-   **`127.0.0.1`, your own computer's local address, which is never filtered.**
+3. **Filtered vs. refused is an important distinction.** A *refused*
+   connection sends you an explicit "no" (`RST`); a *filtered* one just
+   swallows your packets and leaves you waiting (hello, timeouts from Layer 3).
+   Roughly half of any real swarm is filtered or offline at a given instant,
+   which is why the Phase 4 sweep tries up to 80 peers and stops at the first
+   success.
+4. **⚠️ We once blamed the network for our own bug.** This test originally
+   only *counted* the peers it decoded, so it happily reported `Peers found:
+   50` while every address inside was byte-reversed by a Phase 3 bug in
+   `decodeCompactPeers()` (see Phase 4's FakePeer section). Counting is not
+   verifying — and "the network is blocking us" is a claim you have to earn.
+   There is now an offline regression test that pins the exact decoded bytes.
+
+## `127.0.0.1` — your own computer's local address
+
+Never filtered, because traffic to it never leaves the machine. Phases 4–7
+lean on it heavily.
 
 ## Building the whole thing: `HttpTracker`
 
@@ -577,7 +586,7 @@ to avoid leaking the DNS list.
 | `sslContext()` | **function-local `static` (Meyers singleton)** | one shared `SSL_CTX*` created once, trust store loaded, reused for all connections |
 | `upgradeToTls(c, host)` | **TLS with real verification** | `SSL_set_tlsext_host_name` (SNI), `SSL_set1_host` (name check), `SSL_VERIFY_PEER` (chain check), then `SSL_connect` |
 | `httpGet(url, maxRedirects)` | **redirect-following loop** | for up to N hops: connect, TLS, GET, follow 301/302/303/307, return the final response |
-| `decodeCompactPeers(blob, out)` | **fixed-size record decoding** | split the blob into 6-byte records; reassemble the big-endian IP and port (see below) |
+| `decodeCompactPeers(blob, out)` | **fixed-size record decoding** | split the blob into 6-byte records; `memcpy` the 4 address bytes (already network order) and reassemble the 2 port bytes (see below) |
 | `HttpTracker::announce(req, maxRedirects)` | the **orchestrator** | `httpGet` → check 200 → bencode-decode body (Phase 1!) → pull fields → decode peers → `TrackerResponse` |
 
 Three of these deserve a beat:
@@ -666,10 +675,28 @@ protocol-specific rules on top:
 > *moved*); `performRequest` writes raw HTTP, reads to EOF, splits headers, and
 > un-chunks; `httpGet` loops through redirects; `announce` bencode-decodes the
 > body with Phase 1's decoder, pulls fields defensively, and
-> `decodeCompactPeers` reassembles big-endian 6-byte records into `Peer`
-> objects. The techniques underneath: happy-pathway loops, partial-I/O loops,
+> `decodeCompactPeers` reads fixed 6-byte records into `Peer` objects. The
+> techniques underneath: happy-pathway loops, partial-I/O loops,
 > percent-encoding, a function-local `static` singleton, move-only RAII
 > wrappers, and hand-rolled endianness conversion.
+
+> **The byte-order trap (cost us one real bug).** The obvious way to rebuild
+> the address looks right and is wrong:
+>
+> ```cpp
+> addr.s_addr = (b[0] << 24) | (b[1] << 16) | (b[2] << 8) | b[3];  // NO
+> std::memcpy(&addr.s_addr, b, 4);                                   // yes
+> ```
+>
+> The shifts build the correct *number* (`0x3ADB7799` = 58.219.119.153), but
+> `in_addr::s_addr` is **already stored in network byte order** — assigning a
+> host integer to it writes the bytes in the machine's native little-endian
+> order, so `inet_ntop()` read them back reversed and we dialled
+> `153.119.219.58`. The *port* was still correct, which is exactly why nobody
+> noticed. The tracker's bytes are already in wire order; the only correct
+> move is to copy them straight in. The lesson generalises: **before
+> hand-assembling an address, check whether the destination field is already
+> in network order — if it is, don't shift, just copy.**
 
 ## The real test output
 

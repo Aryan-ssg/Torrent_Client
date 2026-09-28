@@ -18,8 +18,10 @@
 // garbage (corrupted transmission, lies, attack). The hash check turns a bad
 // peer into a REPORTED failure instead of corrupted storage.
 //
-// Real internet peers are unreachable from this machine (firewall), so the
-// tests run this against the loopback FakePeer seeder (Phase 5).
+// Real internet peers are reachable (Phase 4 proves it against the live
+// swarm), but they are not controllable - a real one will not send a
+// deliberately corrupted piece on cue. So the tests run this against the
+// loopback FakePeer seeder, which can misbehave on demand.
 //
 // Java parallel: like a small client method that downloads one chunk/Range and
 // verifies a checksum before returning it.
