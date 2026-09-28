@@ -28,7 +28,11 @@ class HttpTracker {
 public:
     // Send one announce request and get back the parsed peer list.
     // Follows up to `maxRedirects` HTTP redirects (301/302) before giving up.
-    static TrackerResponse announce(const TrackerRequest& request, int maxRedirects = 3);
+    // `timeoutSeconds` caps this tracker. 0 uses the default. The caller
+    // (TrackerPool) passes what is left of its overall budget so one
+    // unresponsive tracker cannot consume the whole announce window.
+    static TrackerResponse announce(const TrackerRequest& request, int maxRedirects = 3,
+                                    int timeoutSeconds = 0);
 };
 
 // Six bytes encode one IPv4 peer: 4-byte big-endian IP + 2-byte big-endian

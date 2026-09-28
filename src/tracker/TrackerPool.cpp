@@ -20,6 +20,10 @@
 
 namespace {
 
+// Ceiling on how long any single tracker may occupy the announce. Without it a
+// generous overall deadline would be spent entirely inside one tracker.
+constexpr int kMaxSecondsPerTracker = 25;
+
 // A tracker URL's scheme, lowercased, or "" if there isn't one.
 // "udp://x/announce" -> "udp", "HTTP://x" -> "http", "x/announce" -> "".
 std::string schemeOf(const std::string& url) {
@@ -135,14 +139,14 @@ TrackerPool::TrackerPool(const TorrentFile& torrent, bool useFallbackTrackers)
 // =============================================================================
 // announceToUrl() - the scheme dispatch
 // =============================================================================
-TrackerResponse TrackerPool::announceToUrl(const TrackerRequest& request) {
+TrackerResponse TrackerPool::announceToUrl(const TrackerRequest& request, int maxSeconds) {
     const std::string scheme = schemeOf(request.announceUrl);
 
     if (scheme == "udp") {
-        return UdpTracker::announce(request);  // BEP 15
+        return UdpTracker::announce(request, maxSeconds);  // BEP 15
     }
     if (scheme == "http" || scheme == "https" || scheme.empty()) {
-        return HttpTracker::announce(request);
+        return HttpTracker::announce(request, 3, maxSeconds);
     }
     throw std::runtime_error("unsupported tracker scheme \"" + scheme + "\" in " +
                              request.announceUrl);
@@ -198,7 +202,7 @@ TrackerResult TrackerPool::announce(const std::string& peerId,
 
             for (size_t k = 0; k < attempts.size(); k++) {
                 futures.emplace_back(std::async(
-                    std::launch::async, [this, &attempts, &peerId, tierIndex, start, k]() {
+                    std::launch::async, [this, &attempts, &peerId, deadline, tierIndex, start, k]() {
                         Attempt& a = attempts[k];
                         a.url = tiers_[tierIndex][start + k];
 
@@ -210,9 +214,21 @@ TrackerResult TrackerPool::announce(const std::string& peerId,
                         request.event = "started";
                         request.compact = true;
 
+                        // Whatever is left of the overall budget is this
+                        // tracker's budget. Clamped to a sane per-tracker
+                        // ceiling so a generous overall deadline cannot turn
+                        // into one tracker monopolising the window.
+                        const long long leftMs =
+                            std::chrono::duration_cast<std::chrono::milliseconds>(
+                                deadline - std::chrono::steady_clock::now())
+                                .count();
+                        int budget = static_cast<int>(leftMs / 1000);
+                        if (budget > kMaxSecondsPerTracker) budget = kMaxSecondsPerTracker;
+                        if (budget < 1) budget = 1;
+
                         const auto t0 = std::chrono::steady_clock::now();
                         try {
-                            a.response = announceToUrl(request);
+                            a.response = announceToUrl(request, budget);
                             // A bencoded "failure reason" is a protocol-level
                             // answer, not an exception - and it means our
                             // request was wrong, not that the tracker is down.

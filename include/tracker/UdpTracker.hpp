@@ -123,7 +123,16 @@ public:
     // Announce to a "udp://host:port/announce" URL. The path is ignored, as
     // the spec says it should be. Throws std::runtime_error on failure - the
     // caller (TrackerPool) catches it and records the tracker as unreachable.
-    static TrackerResponse announce(const TrackerRequest& request);
+    //
+    // `maxSeconds` is a HARD budget for this tracker, and it is not optional
+    // decoration. BEP 15's own retry schedule is 15, 30, then 60 seconds, so
+    // an unreachable tracker costs 105s before giving up. A caller with a 30s
+    // overall deadline would be declared "out of time" by its own watchdog
+    // while a single dead tracker was still retrying - and the remaining
+    // tiers, which may hold the trackers that actually work, would never be
+    // tried. Pass the remaining budget; we stop as soon as another attempt
+    // would not fit inside it. 0 means "no cap".
+    static TrackerResponse announce(const TrackerRequest& request, int maxSeconds = 0);
 
     // Parse "udp://host:port[/path]" into host and port. Throws on anything
     // malformed or on a non-udp scheme.

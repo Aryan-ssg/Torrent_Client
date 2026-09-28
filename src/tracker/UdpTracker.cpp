@@ -16,6 +16,8 @@
 #include <sys/time.h>
 #include <unistd.h>
 
+#include <algorithm>
+#include <chrono>
 #include <cstring>
 #include <random>
 #include <sstream>
@@ -207,7 +209,21 @@ void UdpTracker::parseUrl(const std::string& url, std::string& host, uint16_t& p
 // =============================================================================
 // announce()
 // =============================================================================
-TrackerResponse UdpTracker::announce(const TrackerRequest& request) {
+TrackerResponse UdpTracker::announce(const TrackerRequest& request, int maxSeconds) {
+    // Wall-clock budget for this tracker. Every attempt below checks it before
+    // sleeping, and clamps its own timeout to whatever is left, so a dead
+    // tracker cannot overrun the caller's deadline. See the header for why
+    // this matters: BEP 15's 15/30/60s schedule otherwise costs 105s.
+    const auto startedAt = std::chrono::steady_clock::now();
+    auto remaining = [&]() -> int {
+        if (maxSeconds <= 0) return kUdpInitialTimeoutSeconds * 4;  // effectively no cap
+        const auto spent = std::chrono::duration_cast<std::chrono::seconds>(
+                               std::chrono::steady_clock::now() - startedAt)
+                               .count();
+        const long long left = static_cast<long long>(maxSeconds) - spent;
+        return left > 0 ? static_cast<int>(left) : 0;
+    };
+
     if (request.infoHash.size() != 20) {
         throw std::runtime_error("UDP announce needs a 20-byte info hash");
     }
@@ -238,7 +254,13 @@ TrackerResponse UdpTracker::announce(const TrackerRequest& request) {
     std::string lastError = "no reply";
 
     for (int attempt = 0; attempt < 3 && !connected; attempt++) {
-        int timeout = kUdpInitialTimeoutSeconds * (1 << attempt);
+        const int left = remaining();
+        if (left <= 0) {
+            lastError = "out of time budget";
+            break;
+        }
+        // Never schedule an attempt longer than the budget we were given.
+        const int timeout = std::min(kUdpInitialTimeoutSeconds * (1 << attempt), left);
         sock.setTimeout(timeout);
 
         std::vector<uint8_t> reply;
@@ -336,7 +358,12 @@ TrackerResponse UdpTracker::announce(const TrackerRequest& request) {
     lastError = "no reply";
 
     for (int attempt = 0; attempt < 3 && !announced; attempt++) {
-        int timeout = kUdpInitialTimeoutSeconds * (1 << attempt);
+        const int left = remaining();
+        if (left <= 0) {
+            lastError = "out of time budget";
+            break;
+        }
+        const int timeout = std::min(kUdpInitialTimeoutSeconds * (1 << attempt), left);
         sock.setTimeout(timeout);
 
         const uint32_t txn = randomTransactionId();

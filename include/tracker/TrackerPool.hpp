@@ -93,7 +93,13 @@ public:
 
     // Announce to one specific URL, dispatching on scheme. Throws
     // std::runtime_error on failure - the caller (announce) catches it.
-    static TrackerResponse announceToUrl(const TrackerRequest& request);
+    //
+    // `maxSeconds` caps this single tracker. It MUST be passed through to the
+    // transport: a transport that retries on its own schedule (BEP 15 waits
+    // 15s, then 30s, then 60s) can overrun any deadline its caller believes
+    // it has, which turns "try tier 0, then tier 1" into "give up during
+    // tier 0" whenever tier 0 happens to be dead.
+    static TrackerResponse announceToUrl(const TrackerRequest& request, int maxSeconds = 0);
 
 private:
     std::vector<std::vector<std::string>> tiers_;

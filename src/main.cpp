@@ -216,7 +216,7 @@ int main(int argc, char** argv) {
         std::cout << "\nAnnouncing to trackers (peer id " << peerId << ")...\n";
 
         TrackerPool pool(torrent);
-        TrackerResult announce = pool.announce(peerId, 30, 8);
+        TrackerResult announce = pool.announce(peerId, 60, 8);
 
         for (const std::string& line : announce.log) {
             std::cout << "  " << line << "\n";

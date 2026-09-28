@@ -340,11 +340,11 @@ static void upgradeToTls(Connection& c, const std::string& host) {
 // httpGet(): the whole HTTP(S) GET dance. Follows redirects (trackers like
 // opentrackr 301 us from http -> https), so we may loop a few times.
 // =============================================================================
-static HttpResponse httpGet(const std::string& url, int maxRedirects) {
+static HttpResponse httpGet(const std::string& url, int maxRedirects, int timeoutSeconds) {
     std::string current = url;
     for (int redirects = 0; redirects <= maxRedirects; redirects++) {
         Url parsed = parseUrl(current);
-        Connection c = connectTo(parsed, 15);
+        Connection c = connectTo(parsed, timeoutSeconds > 0 ? timeoutSeconds : 15);
 
         // Host header must match the DNS name, and (non-default) port.
         std::string hostHeader = parsed.host;
@@ -427,8 +427,9 @@ void decodeCompactPeers(const std::string& blob, std::vector<Peer>& out) {
 // announce() - the public entry point of Phase 3.
 // Pipeline: URL -> HTTP(S) -> bencode dict -> TrackerResponse.
 // =============================================================================
-TrackerResponse HttpTracker::announce(const TrackerRequest& request, int maxRedirects) {
-    HttpResponse http = httpGet(request.buildAnnounceUrl(), maxRedirects);
+TrackerResponse HttpTracker::announce(const TrackerRequest& request, int maxRedirects,
+                                     int timeoutSeconds) {
+    HttpResponse http = httpGet(request.buildAnnounceUrl(), maxRedirects, timeoutSeconds);
 
     if (http.status != 200) {
         throw BencodeException("Tracker returned HTTP " + std::to_string(http.status));
