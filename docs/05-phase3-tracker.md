@@ -729,6 +729,30 @@ PASS: tracker announce succeeded
 - We now hold a **list of real peer addresses**, the very input Phase 4's
   handshake needs.
 
+## What Phase 3 became once the real world had a say
+
+Everything above describes announcing to **one** HTTP tracker. Real torrents do
+not work that way, and finding that out is most of what Phase 8 was about:
+
+| Reality | What we do now | Where |
+|---|---|---|
+| Most torrents list `udp://` trackers **first** | a full BEP 15 client: two datagrams, one round trip | `UdpTracker` |
+| Torrents list 5–10 trackers in **tiers** (BEP 12) | shuffled, tried in parallel within a tier, falling through on failure | `TrackerPool` |
+| Every tracker in a torrent may be blocked for your network | a last-resort tier of well-known public trackers | `TrackerPool` |
+| A dead tracker costs 15s, then 30s, then 60s per BEP 15 | the deadline is passed *into* the transport, so it cannot overrun | `UdpTracker::announce(request, maxSeconds)` |
+
+The last row is the one worth remembering, because it is a design bug rather
+than a missing feature. Our announce had a 30-second overall deadline, and
+BEP 15's retry schedule is 15 + 30 + 60 = **105 seconds** for a single dead
+tracker. The pool therefore declared itself out of time while still inside the
+*first* tier and never reached the tiers that would have answered. A deadline
+the transport cannot see is not a deadline.
+
+> **More on all of this in [Chapter 10 — Phase 8](10-phase8-client.md)**, which
+> covers UDP trackers, tiered announces, the enforceable deadline, and the
+> measurement showing that a BEP 15 announce must be **98** bytes even though
+> the spec's own field diagram adds up to 96.
+
 ---
 
 *Next: [06 — Phase 4: Peer handshake](06-phase4-handshake.md)*

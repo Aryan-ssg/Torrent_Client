@@ -547,11 +547,11 @@ PASS: nested list -> [[42]]
 PASS: dictionary -> {cow=moo, spam=42}
 FAIL: trailing data not detected   ← would show if strictness ever breaks
 ...
-Passed: 20
+Passed: 38
 Failed: 0
 ```
 
-(16 of the 20 totals are bencode tests; the rest come from Phases 2–4.)
+(16 of the 38 checks are bencode tests; the rest come from the later phases.)
 
 ## One defensive note for the future (a seed for later phases)
 

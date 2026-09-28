@@ -360,6 +360,32 @@ The whole architecture maps cleanly onto the Java world:
 - **Measure honestly**: the timing test compares wall-*clock* against a
   sequential baseline, not a guess.
 
+## What Phase 7 turned out to be missing
+
+This chapter describes a working *parallel* downloader, and it is — but it is
+parallel in a way that does not survive contact with a real file.
+
+Each worker fetched a piece by opening its **own** TCP connection, handshaking,
+saying INTERESTED, waiting for UNCHOKE, pulling the piece, and hanging up. Then
+the next piece started from scratch. For an 8-piece synthetic test that is
+perfectly fine. For the Ubuntu ISO it is 23,664 pieces, so:
+
+- **23,664 connections and 23,664 handshakes**, and
+- roughly **470 sequential requests aimed at each of the ~50 peers** one
+  tracker hands out.
+
+Three fixes came out of that, all in [Chapter 10](10-phase8-client.md):
+
+| Problem | Fix |
+|---|---|
+| A connection per piece | `PeerSession` keeps one connection open and moves many pieces over it, with **8 block requests in flight** and replies matched by `(index, begin)` |
+| Peers were asked for pieces they did not have | `Bitfield` — read the peer's own bitfield and only request what it holds, because an unanswered request is a *stall*, not an error |
+| A claim could stand forever, stranding the tail of a download | claim **tokens** plus time-based reclaim: a worker whose claim has been quiet for 90s loses it, and its late-but-valid answer is discarded rather than allowed to clobber a piece somebody else finished |
+
+The Phase 7 test here used to assert *"12 pieces, exactly 12 connections"* —
+it was pinning the behaviour that had to go. It now asserts pieces arrive over
+**strictly fewer** connections, so reintroducing connect-per-piece fails it.
+
 ---
 
-*Next: [10 — Reference](10-reference.md)*
+*Next: [10 — Phase 8: From library to client](10-phase8-client.md)*

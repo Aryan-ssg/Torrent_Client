@@ -14,9 +14,14 @@ This phase answers two questions:
 1. **Where does our code live, and how is it organised?** (project layout)
 2. **How do we build it?** (the build system)
 
-The milestone: `cmake --build build` succeeds and produces an executable
-(a runnable program file) called `peerflow` — and `./build/peerflow` runs a
-suite of tests that all pass.
+The milestone: `cmake --build build` succeeds and produces **two** executables
+(runnable program files) — `peerflow`, the client you actually use, and
+`peerflow-tests`, the automated suite.
+
+> At the time this chapter was first written there was only one binary,
+> because there was only one program: the test runner. Phase 8 added the real
+> client, and the build now produces a static library with two thin entry
+> points on top of it.
 
 > If Java is your reference point: this chapter is the "why Maven instead of
 > raw `javac`?" chapter. C++ has no universal standard build tool, so each
@@ -171,8 +176,9 @@ set(CMAKE_EXPORT_COMPILE_COMMANDS ON)    # also write compile_commands.json
 find_package(OpenSSL REQUIRED COMPONENTS SSL Crypto)  # find the SSL library
 find_package(Threads REQUIRED)           # find thread support
 
-add_executable(peerflow                  # build a PROGRAM called "peerflow"
-    src/main.cpp                         #   the test runner
+add_library(peerflow_core STATIC ... )   # the engine, compiled once
+add_executable(peerflow src/main.cpp)    # the client
+add_executable(peerflow-tests ...)       # the suite
     src/bencode/BencodeDecoder.cpp       #   Phase 1
     src/torrent/TorrentParser.cpp        #   Phase 2
     src/tracker/TrackerRequest.cpp       #   Phase 3
@@ -182,11 +188,11 @@ add_executable(peerflow                  # build a PROGRAM called "peerflow"
     src/peer/FakePeer.cpp                #   Phase 4 (test server)
 )
 
-target_include_directories(peerflow PRIVATE include)
+target_include_directories(peerflow_core PUBLIC include)
                                    # "when compiling, also look HERE for
                                    #   #include "...." files"
 
-target_link_libraries(peerflow PRIVATE OpenSSL::SSL OpenSSL::Crypto Threads::Threads)
+target_link_libraries(peerflow_core PUBLIC OpenSSL::SSL OpenSSL::Crypto Threads::Threads)
                                    # "when linking, attach these libraries"
 ```
 
@@ -261,13 +267,13 @@ pleasant**), then links the executable. Result: `build/peerflow`.
 
 ```bash
 # STEP 3 — RUN the tests
-./build/peerflow
+./build/peerflow-tests
 ```
 
 All three in one go:
 
 ```bash
-cmake -B build && cmake --build build && ./build/peerflow
+cmake -B build && cmake --build build && ./build/peerflow-tests-tests
 ```
 
 (`&&` = "only run the next if the previous succeeded" — if compilation fails,
@@ -332,8 +338,7 @@ library. This is *not* cheating: real clients depend on the same library.
 
 ## Testing philosophy: PASS and FAIL, no mystery frameworks
 
-The cleverest part of `main.cpp` is that it's both our program *and* its own
-test runner. It follows a deliberately humble pattern:
+The suite in `src/tests/TestRunner.cpp` follows a deliberately humble pattern:
 
 - every check prints a line starting with `PASS:` or `FAIL:`,
 - counters at the end (`passed` / `failed`) tally the result,
@@ -345,7 +350,7 @@ PASS: "i42e" -> 42
 PASS: dictionary -> {cow=moo, spam=42}
 ...
 === Results ===
-Passed: 20
+Passed: 38
 Failed: 0
 ```
 
@@ -358,7 +363,18 @@ Why hand-rolled instead of a framework like Google Test? Two reasons:
 
 The catch is on us: hand-rolled tests are only as good as the checks we write.
 That's exactly why each chapter points at *which* tests prove *what* — so
-`20/20` isn't a number, it's twenty specific guarantees.
+`38/38` isn't a number, it's thirty-eight specific guarantees.
+
+Two of them are worth singling out, because each one pins a bug that once
+shipped and passed everything else:
+
+- **The compact-peer byte-order check.** For a long time every peer address the
+  client dialled was byte-reversed. The tracker test passed anyway, because it
+  only *counted* the peers it decoded, and a reversed address is still a
+  syntactically valid address.
+- **"12 pieces over fewer than 12 connections."** The parallelism test used to
+  assert one connection per piece — pinning the exact behaviour that connection
+  reuse later replaced.
 
 ## Prerequisites in this room (this machine, at the time of writing)
 
@@ -380,7 +396,8 @@ need A C++17 compiler, CMake ≥ 3.14, and OpenSSL.
 
 - ✅ `cmake -B build` configures without errors
 - ✅ `cmake --build build` compiles cleanly (no warnings we accept quietly)
-- ✅ `./build/peerflow` prints `Passed: 20`, `Failed: 0`
+- ✅ `./build/peerflow-tests` prints `Passed: 38`, `Failed: 0`
+- ✅ `./build/peerflow --help` runs and prints the options
 - ✅ source is in Git; generated files in `.gitignore`
 
 Everything from here on rides on this foundation being boring and reliable —

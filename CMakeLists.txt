@@ -14,8 +14,17 @@
 #
 # In C++ with CMake, you have CMakeLists.txt:
 #   project(PeerFlow)
-#   add_executable(peerflow src/main.cpp)
-#   target_include_directories(...)
+#   add_library(peerflow_core STATIC ...)   # the engine
+#   add_executable(peerflow ...)            # the client
+#   add_executable(peerflow-tests ...)      # the test suite
+#
+# Three targets, not one: the engine is compiled once into a static library and
+# the two programs are thin entry points on top of it. That is the same shape
+# as one artifact with two mains, or a jar plus a separate test jar.
+#
+# This produces:
+#   build/peerflow          the client  - ./build/peerflow file.torrent
+#   build/peerflow-tests    the suite   - ./build/peerflow-tests
 # =============================================================================
 
 # Minimum CMake version required (like Maven version requirements)

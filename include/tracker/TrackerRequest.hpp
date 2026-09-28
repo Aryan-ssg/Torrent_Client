@@ -38,8 +38,14 @@ struct TrackerRequest {
     // random alphanumeric chars (Azureus-style, so trackers know our version).
     std::string peerId;
 
-    // The port we will listen on for incoming peer connections (Phase 8).
-    // For now we only CONNECT out, but the tracker still wants a port.
+    // The port we would listen on for incoming peer connections.
+    //
+    // We only ever CONNECT out - there is no listener, and that is deliberate:
+    // binding a port with no accept loop just makes peers dial us and fail.
+    // A pure leecher is fine with that, and most home peers are unreachable
+    // inbound anyway. The tracker still wants a port in the announce, so we
+    // send a plausible one. When seeding arrives (Phase 9) this becomes a real
+    // bound port and the value must start matching it.
     uint16_t port = 6881;
 
     // Bytes uploaded/downloaded since this announce.
