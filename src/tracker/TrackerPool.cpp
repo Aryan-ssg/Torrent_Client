@@ -68,16 +68,50 @@ std::string describe(const Attempt& a) {
 
 }  // namespace
 
+namespace {
+
+// A small built-in list of long-lived public trackers, used as one final
+// fallback tier. qBittorrent, Transmission and Deluge all ship a default
+// tracker list for the same reason: plenty of otherwise healthy torrents
+// point at a tracker that is dead, rate-limiting, or blocking your network.
+// The Ubuntu ISO, for instance, names torrent.ubuntu.com, which answers
+// "Requested download is not authorized for use with this tracker" to any IP
+// outside Canonical's ranges - a completely healthy torrent we would otherwise
+// refuse to download.
+//
+// These are appended as a LAST tier, never prepended: the torrent author's own
+// trackers are tried first, because a private tracker is the authoritative
+// source for its swarm and the public ones may not even carry it. Users should
+// treat this as a safety net, not a replacement.
+const std::vector<std::string>& fallbackTrackers() {
+    static const std::vector<std::string> kFallback = {
+        "udp://tracker.opentrackr.org:1337/announce",
+        "udp://open.demonii.com:1337/announce",
+        "udp://tracker.torrent.eu.org:451/announce",
+        "https://tracker.opentrackr.org:1337/announce",
+    };
+    return kFallback;
+}
+
+}  // namespace
+
 // =============================================================================
 // Construction
 // =============================================================================
-TrackerPool::TrackerPool(const TorrentFile& torrent)
-    : infoHash_(torrent.infoHash), totalLength_(torrent.length) {
+TrackerPool::TrackerPool(const TorrentFile& torrent, bool useFallbackTrackers)
+    : infoHash_(torrent.infoHash),
+      totalLength_(torrent.length),
+      useFallbackTrackers_(useFallbackTrackers) {
     if (!torrent.announceTiers.empty()) {
         tiers_ = torrent.announceTiers;
     } else if (!torrent.announce.empty()) {
         // No multitracker list: the single announce URL is a one-tracker tier.
         tiers_.push_back({torrent.announce});
+    }
+
+    // Last-resort tier, only if the torrent's own trackers are all we have.
+    if (useFallbackTrackers_ && !tiers_.empty()) {
+        tiers_.push_back(fallbackTrackers());
     }
 
     // BEP 12: shuffle within each tier. A torrent's tier is usually written

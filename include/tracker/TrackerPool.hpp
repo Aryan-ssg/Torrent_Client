@@ -68,7 +68,13 @@ class TrackerPool {
 public:
     // Reads the torrent's announce / announce-list and builds the tier list.
     // A torrent with only `announce` yields a single one-tracker tier.
-    explicit TrackerPool(const TorrentFile& torrent);
+    //
+    //   useFallbackTrackers  append one extra tier of well-known public
+    //                        trackers, tried only if every tracker the torrent
+    //                        itself names has failed. On by default, because
+    //                        plenty of healthy torrents point at a tracker
+    //                        that is dead or blocks your network.
+    explicit TrackerPool(const TorrentFile& torrent, bool useFallbackTrackers = true);
 
     // Announce to every tracker, tiers in order, concurrently within a tier.
     //
@@ -91,6 +97,7 @@ public:
 
 private:
     std::vector<std::vector<std::string>> tiers_;
+    bool useFallbackTrackers_ = true;
     std::vector<uint8_t> infoHash_;
     long long totalLength_ = 0;
 };
