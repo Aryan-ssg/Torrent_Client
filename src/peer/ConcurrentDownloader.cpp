@@ -232,6 +232,19 @@ ConcurrentDownloader::Result ConcurrentDownloader::download(
         options.readTimeoutSeconds = timeoutSeconds * 3;
 
         PeerSession session;
+        // Whether THIS worker's session is currently counted in
+        // peersConnected. Deriving that from session.usable() at decrement time
+        // is wrong: a choked peer is still counted (we did connect to it), so
+        // the counter drifts and the UI eventually shows "-2 peers connected".
+        // Tracking our own contribution makes increment and decrement provably
+        // paired, no matter how the session ends.
+        bool sessionCounted = false;
+        auto dropSession = [&]() {
+            if (sessionCounted) {
+                peersConnected.fetch_sub(1);
+                sessionCounted = false;
+            }
+        };
 
         while (!aborted() && !manager.complete()) {
             // 1. Make sure we have a session worth talking to. A session is
@@ -247,7 +260,7 @@ ConcurrentDownloader::Result ConcurrentDownloader::download(
             }
 
             if (needNewPeer) {
-                if (session.usable()) peersConnected.fetch_sub(1);
+                dropSession();
                 session.close();
                 idleRounds++;
 
@@ -298,6 +311,7 @@ ConcurrentDownloader::Result ConcurrentDownloader::download(
                 try {
                     session.connect(peer, options);
                     peersConnected.fetch_add(1);
+                    sessionCounted = true;
                     failures = 0;
                 } catch (const std::exception&) {
                     // Most peers in a real swarm are unreachable at any given
@@ -360,7 +374,7 @@ ConcurrentDownloader::Result ConcurrentDownloader::download(
             }
         }
 
-        if (session.usable()) peersConnected.fetch_sub(1);
+        dropSession();
         session.close();
     };
 
