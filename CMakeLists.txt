@@ -68,6 +68,7 @@ add_library(peerflow_core STATIC
     src/piece/PieceManager.cpp
     src/peer/Bitfield.cpp
     src/peer/PeerSession.cpp
+    src/ui/TerminalUI.cpp
 )
 target_include_directories(peerflow_core PUBLIC include)
 target_link_libraries(peerflow_core PUBLIC OpenSSL::SSL OpenSSL::Crypto Threads::Threads)

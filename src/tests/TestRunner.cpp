@@ -1295,13 +1295,18 @@ int runTests() {
             const bool allPieces = okRun;
             const bool connectionsReused =
                 totalServed >= 1 && totalServed < static_cast<int>(expected);
-            const int piecesPerConnection =
-                totalServed > 0 ? static_cast<int>(expected) / totalServed : 0;
+            // Shown with one decimal: integer division turns 12/7 into "1
+            // pieces each", which reads as if no reuse happened at all.
+            char ratio[32] = "?";
+            if (totalServed > 0) {
+                std::snprintf(ratio, sizeof(ratio), "%.1f",
+                              static_cast<double>(expected) / totalServed);
+            }
 
             if (allPieces && contentOk && connectionsReused) {
                 std::cout << "PASS: 4 workers fetched all " << expected
                           << " pieces over just " << totalServed
-                          << " connection(s) (" << piecesPerConnection
+                          << " connection(s) (" << ratio
                           << " pieces each, file byte-verified)\n";
                 passed++;
             } else {

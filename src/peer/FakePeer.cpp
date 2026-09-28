@@ -165,7 +165,9 @@ void FakePeer::acceptLoop() {
             return;
         }
 
+        activeClientFd_.store(clientFd);
         handleConnection(clientFd);
+        activeClientFd_.store(-1);
         ::close(clientFd);
         servedCount_++;
     }
@@ -191,6 +193,16 @@ void FakePeer::acceptLoop() {
 void FakePeer::shutdown() {
     if (shutdown_.exchange(true)) return;  // already asked to stop
     if (listenFd_ < 0) return;
+
+    // A peer that is mid-conversation is blocked in read() on a client socket,
+    // not parked in accept(), so poking the listener below would never reach
+    // it. shutdown(SHUT_RDWR) is the call that actually wakes a blocked
+    // recv(); close() does not reliably, for the same reason closing a listen
+    // fd does not wake accept().
+    const int clientFd = activeClientFd_.exchange(-1);
+    if (clientFd >= 0) {
+        ::shutdown(clientFd, SHUT_RDWR);
+    }
 
     // The wake-up connection. It never completes a handshake - acceptLoop
     // checks shutdown_ before talking to anyone - so an empty connect is

@@ -83,6 +83,9 @@ private:
     std::vector<uint8_t> infoHash_;  // the torrent we pretend to serve
     std::string serverPeerId_;       // the peer_id we announce with
     std::atomic<bool> shutdown_{false};
+    // The client connection currently being served, so shutdown() can reach a
+    // peer that is mid-conversation rather than parked in accept().
+    std::atomic<int> activeClientFd_{-1};
     int listenFd_ = -1;
     uint16_t port_ = 0;
     int accepted_ = 0;

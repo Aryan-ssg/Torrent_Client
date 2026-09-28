@@ -50,6 +50,10 @@ struct DownloadProgress {
     size_t piecesTotal = 0;
     int peersConnected = 0;   // sessions currently usable
     int peersTried = 0;       // distinct peers dialled so far
+    // Per-piece map, one character per piece ('#' owned, '.' missing). Filled
+    // by the reporter thread from a snapshot of the manager, so the UI can
+    // show WHERE the holes are rather than just how big they are.
+    std::string pieceMap;
     bool finished = false;
     bool failed = false;
     std::string error;

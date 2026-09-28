@@ -29,9 +29,11 @@ constexpr int kStuckClaimSeconds = 90;
 // How often the reporter thread wakes up to publish progress.
 constexpr int kReportIntervalMs = 100;
 
-// Per-worker consecutive failure budget. A worker that keeps hitting broken
-// peers backs off instead of burning the whole peer list in seconds.
-constexpr int kMaxWorkerFailures = 12;
+// How long the WHOLE run may go without storing a single verified piece
+// before we conclude the swarm cannot serve the rest. Generous on purpose: a
+// slow moment, a peer rotating out, or a brief network wobble should never
+// end a download that would have finished.
+constexpr int kStalledRunSeconds = 120;
 
 }  // namespace
 
@@ -120,6 +122,7 @@ ConcurrentDownloader::Result ConcurrentDownloader::download(
                 p.peersConnected = peersConnected.load();
                 p.peersTried = static_cast<int>(peersTried.load());
                 p.finished = manager.complete();
+                p.pieceMap = manager.pieceState().toString();
                 onProgress(p);
                 std::this_thread::sleep_for(std::chrono::milliseconds(kReportIntervalMs));
             }
@@ -133,19 +136,26 @@ ConcurrentDownloader::Result ConcurrentDownloader::download(
             p.peersConnected = peersConnected.load();
             p.peersTried = static_cast<int>(peersTried.load());
             p.finished = manager.complete();
+            p.pieceMap = manager.pieceState().toString();
             onProgress(p);
         });
     }
 
-    // ---- A watchdog for claims that stopped moving -----------------------
-    // Runs on its own timer and reclaims pieces whose worker has gone silent.
-    // Without it, a single unresponsive peer holds its piece forever and the
-    // download never reaches 100%.
+    // ---- A watchdog: reclaims stuck claims AND gives up on a dead swarm ----
+    // Two jobs, one timer, because both are "the run is not making progress
+    // and needs a decision":
+    //
+    //  1. Reclaim pieces whose worker has stopped making progress, so one
+    //     unresponsive peer cannot strand the tail of the download.
+    //  2. Give up on the whole run if NO worker has stored a byte for
+    //     kStalledRunSeconds. Deciding this in one global place is deliberate:
+    //     a per-worker failure count aborts a healthy download whenever the
+    //     dead peers happen to be tried first, which in a real swarm they are.
     //
     // It waits on a condition variable rather than sleeping, so stopping it is
     // immediate. A plain sleep_for here would add its whole interval to the
-    // wall-clock time of EVERY run, which is exactly the kind of thing that
-    // makes a 200 ms download report as 5 seconds.
+    // wall-clock time of EVERY run, which is how a 100 ms download ends up
+    // reporting as 5 seconds.
     std::mutex watchdogMutex;
     std::condition_variable watchdogWake;
     std::atomic<bool> watchdogStop{false};
@@ -156,10 +166,26 @@ ConcurrentDownloader::Result ConcurrentDownloader::download(
                                   [&]() { return watchdogStop.load(); });
             if (watchdogStop.load()) break;
             lock.unlock();
+
             for (int i = 0; i < 8; i++) {
                 PieceManager::ClaimToken token =
                     manager.reclaimStuckPiece(std::chrono::seconds(kStuckClaimSeconds));
                 if (token == PieceManager::kNoClaim) break;
+            }
+
+            if (manager.complete()) {
+                lock.lock();
+                continue;
+            }
+
+            // Time since ANY worker last stored something.
+            const long long nowMs =
+                std::chrono::duration_cast<std::chrono::milliseconds>(
+                    std::chrono::steady_clock::now().time_since_epoch())
+                    .count();
+            if (nowMs - lastProgressMillis.load() >
+                static_cast<long long>(kStalledRunSeconds) * 1000) {
+                ownAbort.store(true);
             }
             lock.lock();
         }
@@ -236,12 +262,17 @@ ConcurrentDownloader::Result ConcurrentDownloader::download(
                                          lastProgressMillis.load() >
                                      3000;
 
-                // A long run of full passes with nothing to show for it means
-                // this swarm cannot give us the remaining pieces. Say so
-                // rather than spinning.
+                // A long run of passes with nothing to show for it means this
+                // worker has no peer with anything we still need. The watchdog
+                // owns the decision to give up on the run as a whole - one
+                // worker running out of useful peers is not the same as the
+                // swarm being finished, and treating them the same would kill
+                // downloads that other workers are still advancing.
                 if (stalled && idleRounds > static_cast<int>(peers.size()) * 4) {
-                    ownAbort.store(true);
-                    break;
+                    // Back off hard and reset, so we re-examine the peer list
+                    // afresh rather than spinning.
+                    idleRounds = 0;
+                    std::this_thread::sleep_for(std::chrono::seconds(1));
                 }
                 if (stalled) {
                     std::this_thread::sleep_for(std::chrono::milliseconds(250));
@@ -270,12 +301,13 @@ ConcurrentDownloader::Result ConcurrentDownloader::download(
                     failures = 0;
                 } catch (const std::exception&) {
                     // Most peers in a real swarm are unreachable at any given
-                    // moment. This is expected, not an error worth reporting.
+                    // moment, so this is the COMMON case, not an error worth
+                    // reporting. What matters is not to give up because of it:
+                    // a tracker hands us a long list where a single reachable
+                    // peer is enough, and a worker that quits after a fixed
+                    // number of failures would abandon a perfectly good swarm
+                    // simply because the dead peers happened to come first.
                     failures++;
-                    if (failures >= kMaxWorkerFailures) {
-                        ownAbort.store(true);
-                        break;
-                    }
                     continue;
                 }
             }

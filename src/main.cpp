@@ -32,6 +32,8 @@
 #include "torrent/TorrentParser.hpp"
 #include "tracker/TrackerPool.hpp"
 #include "tracker/TrackerRequest.hpp"
+#include "peer/ConcurrentDownloader.hpp"
+#include "ui/TerminalUI.hpp"
 
 #include <csignal>
 #include <cstdlib>
@@ -229,9 +231,40 @@ int main(int argc, char** argv) {
 
         if (interrupted()) return 130;
 
-        // Steps 4 (download) and 5 (live display) are wired up in the next
-        // commits; the announce path is deliberately working end to end first.
-        std::cout << "\n(Download pipeline not wired up yet - coming next.)\n";
+        // --- 4 & 5. Download, drawing it live ------------------------------
+        const std::string outputPath = opts.outputDir + "/" + torrent.name;
+        std::cout << "\nWriting to " << outputPath << "\n";
+        if (torrent.length > 0) {
+            std::cout << "  (resume works: rerun this command and completed pieces "
+                         "are re-verified from disk)\n";
+        }
+
+        TerminalUI ui(opts.noTui);
+        ui.log("peer id " + peerId);
+
+        std::atomic<bool> abortFlag{false};
+        ConcurrentDownloader::Result dl = ConcurrentDownloader::download(
+            torrent, announce.peers, outputPath, peerId, opts.workers, opts.timeoutSeconds,
+            [&ui](const DownloadProgress& p) { ui.onProgress(p); }, &abortFlag);
+
+        DownloadProgress last;
+        last.bytesDone = 0;
+        last.bytesTotal = torrent.length;
+        last.piecesTotal = torrent.pieces.size() / 20;
+
+        if (interrupted()) {
+            ui.abandon();
+            std::cout << "\nInterrupted. Completed pieces are on disk; rerun the same "
+                         "command to resume.\n";
+            return 130;
+        }
+
+        ui.finish(last, dl.ok, dl.error);
+
+        if (!dl.ok) {
+            return 1;
+        }
+        std::cout << "Saved to " << outputPath << "\n";
         return 0;
 
     } catch (const std::exception& e) {

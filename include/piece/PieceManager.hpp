@@ -140,6 +140,14 @@ public:
     // The output file we are writing (handy for tests that inspect/corrupt).
     const std::string& path() const { return outputPath_; }
 
+    // A snapshot of which pieces are owned, for the progress display.
+    //
+    // Copied under the lock rather than exposed by reference: the UI reads it
+    // from a different thread (the reporter) than the one writing it, and a
+    // 3 KB bitfield copied ten times a second costs nothing next to the
+    // complexity of lending out a view into a vector that is being mutated.
+    Bitfield pieceState() const;
+
     // Total bytes on disk once finished - what the progress bar measures
     // against. Cached, because the UI asks for it on every repaint.
     long long totalBytes() const { return fullLength_; }

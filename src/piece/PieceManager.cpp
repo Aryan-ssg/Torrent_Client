@@ -85,6 +85,15 @@ size_t PieceManager::pieceLength(size_t index) const {
     return std::min<size_t>(torrent_.pieceLength, fullLength_ - offset);
 }
 
+Bitfield PieceManager::pieceState() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    Bitfield map(states_.size());
+    for (size_t i = 0; i < states_.size(); i++) {
+        if (states_[i] == State::kOwned) map.set(i);
+    }
+    return map;
+}
+
 size_t PieceManager::completedCount() const {
     std::lock_guard<std::mutex> lock(mutex_);
     size_t count = 0;
