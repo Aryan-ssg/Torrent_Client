@@ -8,8 +8,10 @@
 
 #include <cerrno>       // For errno
 #include <cstring>      // For std::strerror
+#include <fcntl.h>      // fcntl, F_GETFL, F_SETFL, O_NONBLOCK (non-blocking connect)
 #include <netdb.h>      // getaddrinfo, gai_strerror
-#include <sys/socket.h> // socket, connect, send, recv
+#include <poll.h>       // poll (our real connect timeout)
+#include <sys/socket.h> // socket, connect, send, recv, getsockopt, SO_ERROR
 #include <sys/time.h>   // struct timeval (for SO_RCVTIMEO)
 #include <unistd.h>     // close
 
@@ -42,9 +44,23 @@ TcpSocket& TcpSocket::operator=(TcpSocket&& other) noexcept {
 // IP literal and it returns every usable address (IPv4 + IPv6), like
 // Java's InetAddress.getAllByName(). We try each one until a connect() works.
 //
-// The SO_RCVTIMEO / SO_SNDTIMEO socket options turn a black-hole peer (that
-// never answers) into a -1 return value instead of an infinite hang. Trackers
-// hand out plenty of dead/firewalled peers, so this is mandatory.
+// TIME-OUT: we need a real one, because trackers hand out plenty of
+// black-holed peers (firewalled home routers that swallow SYMs). The obvious
+// approach - setsockopt(SO_RCVTIMEO/SO_SNDTIMEO) then a blocking connect() -
+// DOES NOT WORK: on Linux those two options apply to send()/recv() only, and
+// never to connect(). A blocking connect() to a black hole therefore sits in
+// the kernel for the whole TCP SYN-retry window (~130s with the default
+// tcp_syn_retries=6) no matter what we ask for. Twenty dead peers would then
+// take the best part of an hour.
+//
+// So we do it the way everyone really does it:
+//   1. flip the socket to non-blocking, so connect() returns straight away
+//      with EINPROGRESS (or an immediate hard error like ECONNREFUSED);
+//   2. poll() for POLLOUT with OUR deadline;
+//   3. ask SO_ERROR whether the handshake actually succeeded;
+//   4. flip the socket back to blocking for the rest of its life.
+// SO_RCVTIMEO/SO_SNDTIMEO are still set below because they DO work for the
+// send()/recv() calls that come afterwards.
 // =============================================================================
 void TcpSocket::connect(const std::string& host, const std::string& port, int timeoutSeconds) {
     struct addrinfo hints {};
@@ -57,25 +73,82 @@ void TcpSocket::connect(const std::string& host, const std::string& port, int ti
         throw NetException("DNS lookup failed for " + host + ": " + gai_strerror(rc));
     }
 
+    std::string lastError = "no route to host";
+
     for (struct addrinfo* ai = results; ai != nullptr; ai = ai->ai_next) {
         int fd = ::socket(ai->ai_family, ai->ai_socktype, ai->ai_protocol);
-        if (fd < 0) continue;
+        if (fd < 0) {
+            lastError = std::strerror(errno);
+            continue;
+        }
 
+        // These two DO apply to send()/recv(), so keep them for later.
         struct timeval tv {};
         tv.tv_sec = timeoutSeconds;
         ::setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
         ::setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
 
-        if (::connect(fd, ai->ai_addr, ai->ai_addrlen) == 0) {
-            fd_ = fd;   // keep this one
-            break;
+        // 1. Non-blocking mode, so connect() cannot park in the kernel.
+        int flags = ::fcntl(fd, F_GETFL, 0);
+        if (flags < 0 || ::fcntl(fd, F_SETFL, flags | O_NONBLOCK) < 0) {
+            lastError = std::strerror(errno);
+            ::close(fd);
+            continue;
         }
-        ::close(fd);    // this address didn't work, keep trying
+
+        // 2. Kick off the handshake.
+        if (::connect(fd, ai->ai_addr, ai->ai_addrlen) != 0) {
+            int err = errno;
+            if (err != EINPROGRESS) {
+                // A hard, immediate failure (refused / unreachable / no
+                // route). Nothing to wait for - try the next address.
+                lastError = std::strerror(err);
+                ::close(fd);
+                continue;
+            }
+
+            // 3. EINPROGRESS: the SYN is on the wire. Wait for it - but only
+            //    for as long as the caller allowed.
+            struct pollfd pfd {};
+            pfd.fd = fd;
+            pfd.events = POLLOUT;
+            int pr = ::poll(&pfd, 1, timeoutSeconds * 1000);
+            if (pr == 0) {
+                lastError = "timed out after " + std::to_string(timeoutSeconds) + "s";
+                ::close(fd);
+                continue;
+            }
+            if (pr < 0) {
+                lastError = std::strerror(errno);
+                ::close(fd);
+                continue;
+            }
+
+            // 4. "Writable" only means the handshake FINISHED - it does not
+            //    mean it SUCCEEDED. SO_ERROR carries the real verdict.
+            int soError = 0;
+            socklen_t soLen = sizeof(soError);
+            if (::getsockopt(fd, SOL_SOCKET, SO_ERROR, &soError, &soLen) < 0 || soError != 0) {
+                lastError = std::strerror(soError != 0 ? soError : errno);
+                ::close(fd);
+                continue;
+            }
+        }
+
+        // 5. Back to blocking: send()/recv() (and the SO_*TIMEO options we
+        //    set above) assume an ordinary blocking socket.
+        int blocking = ::fcntl(fd, F_GETFL, 0);
+        if (blocking >= 0) {
+            ::fcntl(fd, F_SETFL, blocking & ~O_NONBLOCK);
+        }
+
+        fd_ = fd;   // keep this one
+        break;
     }
     ::freeaddrinfo(results);  // release the DNS results list
 
     if (fd_ < 0) {
-        throw NetException("Could not connect to " + host + ":" + port);
+        throw NetException("Could not connect to " + host + ":" + port + " (" + lastError + ")");
     }
 }
 
