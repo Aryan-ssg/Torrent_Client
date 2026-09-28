@@ -7,8 +7,15 @@
 struct TorrentFile {
     std::string announce;
     std::string name;
-    long long pieceLength;
-    long long length;
+
+    // These two are value-initialised, which looks like belt-and-braces but
+    // is not. A torrent need not CONTAIN them: a multi-file torrent has a
+    // `files` list and no top-level `length` at all, so the parser simply
+    // never assigns the field. Without an initialiser the struct then carries
+    // whatever was on the stack - which showed up as a 3.3 MB file claiming to
+    // be 86.1 TiB - and that garbage flows straight into ftruncate().
+    long long pieceLength = 0;
+    long long length = 0;
     std::vector<uint8_t> pieces;    // concatenated SHA-1 hashes (20 bytes each)
     std::vector<uint8_t> infoHash;  // 20-byte SHA-1 of bencoded info dict
 

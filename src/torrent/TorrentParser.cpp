@@ -179,8 +179,12 @@ std::vector<uint8_t> TorrentParser::computeInfoHash(const std::vector<uint8_t>& 
 TorrentFile TorrentParser::parse(const std::string& filepath) {
     // Step 1: Read raw bytes
     std::vector<uint8_t> raw = readFile(filepath);
+    return parseString(std::string(raw.begin(), raw.end()));
+}
 
+TorrentFile TorrentParser::parseString(const std::string& bencoded) {
     // Step 2: Decode the bencoded data
+    std::vector<uint8_t> raw(bencoded.begin(), bencoded.end());
     BencodeValue root = BencodeDecoder::decode(raw);
 
     if (root.getType() != BencodeValue::DICT) {
@@ -245,10 +249,36 @@ TorrentFile TorrentParser::parse(const std::string& filepath) {
         torrent.pieceLength = plIt->second.asInteger();
     }
 
+    // MULTI-FILE TORRENTS ARE NOT SUPPORTED YET - and we say so out loud.
+    //
+    // A multi-file torrent describes its content as a `files` list of
+    // {length, path} entries and has NO top-level `length`. Silently ignoring
+    // that and carrying on is the worst option available: the piece stream
+    // would be written into a single flat file, every piece after the first
+    // file boundary would land at the wrong place, and either the SHA-1s
+    // would fail or - worse - it would produce a single corrupt file that
+    // looks like a successful download. Refusing loudly costs the user one
+    // clear sentence instead of a mystery.
+    if (info.find("files") != info.end()) {
+        throw BencodeException(
+            "this is a MULTI-FILE torrent (it lists several files in a folder). "
+            "Only single-file torrents are supported right now - the kind that "
+            "wrap one big file such as a disc image. Re-pack as a single file, "
+            "or use a client that supports multi-file torrents.");
+    }
+
     // length (single-file torrent)
     auto lenIt = info.find("length");
     if (lenIt != info.end() && lenIt->second.getType() == BencodeValue::INTEGER) {
         torrent.length = lenIt->second.asInteger();
+    }
+
+    if (torrent.length <= 0) {
+        throw BencodeException("torrent has no usable length (is it a multi-file or "
+                               "magnet-only torrent?)");
+    }
+    if (torrent.pieceLength <= 0) {
+        throw BencodeException("torrent has no usable piece length");
     }
 
     // pieces (raw SHA-1 hashes)

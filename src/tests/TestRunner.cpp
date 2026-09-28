@@ -529,6 +529,46 @@ int runTests() {
     // -------------------------------------------------------------------------
     std::cout << "\n=== Torrent Parser Tests ===\n\n";
 
+    // ---- Multi-file torrents must be refused, loudly ---------------------
+    // A multi-file torrent lists its content under `files` and has no
+    // top-level `length`. We do not support those yet, and the failure mode we
+    // are guarding against is not a crash: it is silently laying every piece
+    // into one flat file at the wrong offsets and producing something that
+    // looks like a completed download but is not.
+    //
+    // This also pins the uninitialised-field bug. `length` and `pieceLength`
+    // are not assigned for this shape of torrent, and before they were given
+    // default initialisers the struct read stack garbage - a 3 MB file
+    // reported itself as 86.1 TiB, straight into ftruncate().
+    {
+        // A minimal multi-file torrent: two files under an implicit folder,
+        // so `info` has a `files` list and no top-level `length`. 20 zero
+        // bytes stand in for the one SHA-1 the 3 KB of content implies.
+        const std::string multi =
+            "d8:announce35:udp://tracker.example:6969/announce4:infod5:filesld6"
+            ":lengthi1024e4:pathl7:E01.mkveed6:lengthi2048e4:pathl7:E02.mkveee6"
+            ":lengthi16384e4:name4:show12:piece lengthi16384e6:pieces20:AAAAAAA"
+            "AAAAAAAAAAAAAee";
+
+        bool refused = false;
+        std::string message;
+        try {
+            TorrentParser::parseString(multi);
+        } catch (const std::exception& e) {
+            refused = true;
+            message = e.what();
+        }
+
+        if (refused && message.find("MULTI-FILE") != std::string::npos) {
+            std::cout << "PASS: multi-file torrent refused with a clear reason\n";
+            passed++;
+        } else {
+            std::cout << "FAIL: multi-file torrent (refused=" << refused
+                      << ", message=\"" << message << "\")\n";
+            failed++;
+        }
+    }
+
     try {
         TorrentFile torrent = TorrentParser::parse("test/ubuntu-24.04.1-desktop-amd64.iso.torrent");
 
