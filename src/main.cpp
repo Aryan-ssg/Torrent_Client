@@ -35,6 +35,7 @@
 #include <iomanip>
 #include <algorithm>   // For std::min, std::equal
 #include <cstdio>      // For std::remove (reset test files between runs)
+#include <set>         // For std::set (don't re-try the same dead peer address)
 #include <chrono>      // For std::chrono (Phase 7 timing test)
 #include <openssl/sha.h>  // For SHA1 (synthetic torrent piece hashes)
 #include <fstream>     // For std::ifstream / std::fstream (Phase 6 disk checks)
@@ -556,6 +557,38 @@ int main() {
     // -------------------------------------------------------------------------
     std::cout << "\n=== Tracker Tests ===\n\n";
 
+    // ---- Offline regression test for the compact-peer byte order ----------
+    // A real bug lived here once. decodeCompactPeers() built the right IP
+    // *number* with bit shifts and then assigned it to in_addr::s_addr - which
+    // is ALREADY stored in network byte order. That double-converted every
+    // address, so the tracker handed us 58.219.119.153 and we dialled
+    // 153.119.219.58. Nothing caught it: the old test only counted peers, and
+    // 153.119.219.58 is a syntactically valid address, so it sailed through.
+    // This test pins the exact bytes down forever, with no network needed.
+    {
+        // 0x3A 0xDB 0x77 0x99 = 58.219.119.153, port 0x4E29 = 20009.
+        std::string blob;
+        blob.push_back(static_cast<char>(0x3A));
+        blob.push_back(static_cast<char>(0xDB));
+        blob.push_back(static_cast<char>(0x77));
+        blob.push_back(static_cast<char>(0x99));
+        blob.push_back(static_cast<char>(0x4E));
+        blob.push_back(static_cast<char>(0x29));
+
+        std::vector<Peer> decoded;
+        decodeCompactPeers(blob, decoded);
+
+        if (decoded.size() == 1 && decoded[0].ip == "58.219.119.153" && decoded[0].port == 20009) {
+            std::cout << "PASS: compact peer byte order (58.219.119.153:20009, not reversed)\n";
+            passed++;
+        } else {
+            std::cout << "FAIL: compact peer byte order -> got "
+                      << (decoded.empty() ? std::string("(nothing)") : decoded[0].toString())
+                      << ", expected 58.219.119.153:20009\n";
+            failed++;
+        }
+    }
+
     try {
         TorrentFile torrent = TorrentParser::parse("test/ubuntu-24.04.1-desktop-amd64.iso.torrent");
 
@@ -619,25 +652,65 @@ int main() {
             std::cout << "FAIL: tracker returned no peers to handshake with\n";
             failed++;
         } else {
-            std::cout << "Trying to handshake with up to 25 peers...\n\n";
+            // Tuning knobs for the real-network handshake sweep. A single
+            // 4-second attempt against 25 peers proves very little: most peers
+            // in a real swarm are unreachable at any given moment, so we
+            // retry across several fresh announces and give each one a
+            // timeout closer to the tracker's own 15s.
+            const int kHandshakeTimeoutSeconds = 10;
+            const int kMaxHandshakeAttempts = 80;
+            const int kMaxAnnounces = 6;
+            std::set<std::string> triedPeers;  // don't re-try a dead address
+            int announces = 0;
+
+            std::cout << "Trying to handshake with up to " << kMaxHandshakeAttempts
+                      << " peers (timeout " << kHandshakeTimeoutSeconds << "s each)...\n\n";
             int successes = 0;
             int attempts = 0;
 
-            for (size_t i = 0; i < response.peers.size() && attempts < 25; i++) {
-                attempts++;
-                const Peer& peer = response.peers[i];
+            // One announce only hands us ~50 peers, and in any real swarm a
+            // large share of them are unreachable at this exact instant -
+            // offline, NAT'd without a forwarded port, or uTP-only. So we ask
+            // the tracker a few more times for a fresh, overlapping peer list
+            // and keep going until either we have talked to enough peers or we
+            // have proven the handshake works against a real one.
+            while (attempts < kMaxHandshakeAttempts && successes == 0 && announces < kMaxAnnounces) {
+                for (size_t i = 0; i < response.peers.size() && attempts < kMaxHandshakeAttempts; i++) {
+                    const Peer& peer = response.peers[i];
+                    if (triedPeers.count(peer.toString())) continue;  // no repeats
+                    triedPeers.insert(peer.toString());
 
-                // Phase 4: connect and convince this peer we share a torrent.
-                PeerHandshake::Result result =
-                    PeerHandshake::perform(peer, torrent.infoHash, generatePeerId(), 4);
+                    attempts++;
+                    // Phase 4: connect and convince this peer we share a torrent.
+                    PeerHandshake::Result result =
+                        PeerHandshake::perform(peer, torrent.infoHash, generatePeerId(), kHandshakeTimeoutSeconds);
 
-                if (result.ok) {
-                    successes++;
-                    std::cout << "Handshake OK with " << peer.toString()
-                              << ", peer_id = " << result.peerId << "\n";
-                } else {
-                    std::cout << "Handshake failed with " << peer.toString()
-                              << ": " << result.error << "\n";
+                    if (result.ok) {
+                        successes++;
+                        std::cout << "Handshake OK with " << peer.toString()
+                                  << ", peer_id = " << result.peerId << "\n";
+                    } else {
+                        std::cout << "Handshake failed with " << peer.toString()
+                                  << ": " << result.error << "\n";
+                    }
+                }
+
+                if (attempts >= kMaxHandshakeAttempts || successes > 0) break;
+
+                // Re-announce for a fresh batch of peers.
+                announces++;
+                TrackerRequest again;
+                again.announceUrl = "https://tracker.opentrackr.org/announce";
+                again.infoHash = torrent.infoHash;
+                again.peerId = generatePeerId();
+                again.port = 6881;
+                again.left = torrent.length;
+                again.event = "";
+                try {
+                    response = HttpTracker::announce(again);
+                } catch (const std::exception& e) {
+                    std::cout << "(re-announce failed: " << e.what() << ")\n";
+                    break;
                 }
             }
 
