@@ -396,9 +396,22 @@ void decodeCompactPeers(const std::string& blob, std::vector<Peer>& out) {
     for (size_t i = 0; i + 6 <= blob.size(); i += 6) {
         const unsigned char* b = reinterpret_cast<const unsigned char*>(blob.data() + i);
 
-        // Reassemble the 4 IP bytes big-endian: b0 b1 b2 b3.
+        // The 4 address bytes are ALREADY in network (big-endian) order -
+        // that is exactly how the tracker put them on the wire. And
+        // in_addr::s_addr is itself stored in network order, so the only
+        // correct thing to do is COPY the 4 bytes straight in.
+        //
+        // BUG HISTORY: this used to be
+        //     addr.s_addr = (b[0] << 24) | (b[1] << 16) | (b[2] << 8) | b[3];
+        // which looks right but double-converts. That expression builds the
+        // right *number* (0x3ADB7799), but assigning a number to s_addr
+        // writes it in the machine's native little-endian order, so inet_ntop
+        // read the bytes back reversed and we dialled 153.119.219.58 instead
+        // of 58.219.119.153. Every single peer address was backwards, which is
+        // why the tracker test passed (it only counted 50 peers) while every
+        // real handshake failed.
         in_addr addr {};
-        addr.s_addr = (b[0] << 24) | (b[1] << 16) | (b[2] << 8) | b[3];
+        std::memcpy(&addr.s_addr, b, 4);
 
         // Reassemble the 2 port bytes big-endian.
         uint16_t port = static_cast<uint16_t>((b[4] << 8) | b[5]);
