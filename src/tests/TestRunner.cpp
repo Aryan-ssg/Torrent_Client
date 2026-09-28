@@ -402,6 +402,83 @@ static std::string bencString(const std::string& s) {
     return std::to_string(s.size()) + ":" + s;
 }
 
+// =============================================================================
+// The one real-torrent fact the suite needs
+// =============================================================================
+// Several checks below talk to the LIVE internet: they announce to a real
+// tracker and, in one case, shake hands with real peers. That needs an info
+// hash which genuinely belongs to a torrent somebody is sharing - a made-up
+// one announces fine and returns zero peers, because no swarm has it.
+//
+// So the hash is spelled out here as 40 hex characters, which is all it ever
+// was. The suite used to read a 464 KB Ubuntu ISO .torrent for this, which
+// made it depend on a file that .gitignore excludes: the tests passed on the
+// machine that happened to have it and would have failed on a fresh clone.
+//
+// Only the info hash and the size are needed. Everything else about that
+// torrent - its 24,000 piece hashes, its name, its tracker list - was dead
+// weight, because the tests either override the tracker or never look.
+namespace fixture {
+
+constexpr const char* kLiveInfoHashHex = "ea4a54f2234378bac30753b321529a3b610ebf2f";
+constexpr long long kLiveLength = 6203355136;  // 6.2 GB, only used as `left`
+
+std::vector<uint8_t> liveInfoHash() {
+    std::vector<uint8_t> out;
+    const char* hex = kLiveInfoHashHex;
+    auto nibble = [](char c) { return c <= '9' ? c - '0' : (c | 32) - 'a' + 10; };
+    for (int i = 0; i < 20; i++) {
+        out.push_back(static_cast<uint8_t>((nibble(hex[i * 2]) << 4) | nibble(hex[i * 2 + 1])));
+    }
+    return out;
+}
+
+}  // namespace fixture
+
+// Build a complete, valid, SINGLE-FILE .torrent as bencode bytes, for the
+// parser test. Real shape, small enough to keep in a string: one announce
+// list, one info dict, three piece hashes. This proves the parser on the same
+// structure a real file has, without needing a real file.
+static std::string makeSingleFileTorrentBytes() {
+    const size_t pieceLen = 32768;
+    const size_t length = 100000;
+    const size_t pieces = (length + pieceLen - 1) / pieceLen;
+
+    std::string piecesField;
+    for (size_t i = 0; i < pieces; i++) {
+        // Any 20 bytes will do; the parser is being tested, not the content.
+        for (int b = 0; b < 20; b++) {
+            piecesField.push_back(static_cast<char>((i * 7 + b) & 0xFF));
+        }
+    }
+
+    // Bencode requires dictionary keys in sorted byte order, and the info hash
+    // is the SHA-1 of these exact bytes - so they must be built, not typed.
+    std::string info;
+    info += bencString("info");
+    info += "d";
+    info += bencString("length") + "i" + std::to_string(length) + "e";
+    info += bencString("name") + bencString("fixture-test.bin");
+    info += bencString("piece length") + "i" + std::to_string(pieceLen) + "e";
+    info += bencString("pieces") + std::to_string(piecesField.size()) + ":" + piecesField;
+    info += "e";
+
+    std::string out;
+    out += "d";  // the top-level dictionary - easy to forget, and then the
+                 // whole file parses as one short string plus trailing junk
+    out += bencString("announce") + bencString("udp://tracker.example:6969/announce");
+    // announce-list is a list OF tiers, each tier a list of URLs. The
+    // brackets are structural, not data - wrapping them in bencString() would
+    // produce a byte string and the top-level parse would stop early.
+    out += bencString("announce-list");
+    out += "l";  // the list of tiers
+    out += "l" + bencString("udp://tracker.example:6969/announce") + "e";  // tier 0
+    out += "e";
+    out += info;
+    out += "e";  // close the top-level dict
+    return out;
+}
+
 // Build the TorrentFile for our synthetic torrent. infoHash is SHA-1 of the
 // RAW bencoded info dict -- the exact "don't re-encode" rule from Phase 2,
 // applied here on the spot (keys in sorted order).
@@ -570,7 +647,9 @@ int runTests() {
     }
 
     try {
-        TorrentFile torrent = TorrentParser::parse("test/ubuntu-24.04.1-desktop-amd64.iso.torrent");
+        // Built in memory, so this check needs no file on disk. The suite used
+        // to read a 464 KB .torrent here, which made a fresh clone fail.
+        TorrentFile torrent = TorrentParser::parseString(makeSingleFileTorrentBytes());
 
         std::cout << "Announce:      " << torrent.announce << "\n";
         std::cout << "Name:          " << torrent.name << "\n";
@@ -733,19 +812,15 @@ int runTests() {
     }
 
     try {
-        TorrentFile torrent = TorrentParser::parse("test/ubuntu-24.04.1-desktop-amd64.iso.torrent");
-
-        // NOTE: torrent.ubuntu.com blocks this machine's IP. Real clients add
-        // extra trackers all the time, so we override the announce URL with
-        // tracker.opentrackr.org, which works over HTTPS.
+        // Only the info hash is needed here - see the note on `fixture` above.
         TrackerRequest request;
         request.announceUrl = "https://tracker.opentrackr.org/announce";
-        request.infoHash = torrent.infoHash;
+        request.infoHash = fixture::liveInfoHash();
         request.peerId = generatePeerId();
         request.port = 6881;            // our (future) listen port
         request.downloaded = 0;
         request.uploaded = 0;
-        request.left = torrent.length;  // everything still to download
+        request.left = fixture::kLiveLength;  // everything still to download
         request.event = "started";
 
         std::cout << "Announce URL:  " << request.buildAnnounceUrl() << "\n\n";
@@ -779,15 +854,14 @@ int runTests() {
     std::cout << "\n=== Peer Handshake Tests ===\n\n";
 
     try {
-        TorrentFile torrent = TorrentParser::parse("test/ubuntu-24.04.1-desktop-amd64.iso.torrent");
-
-        // Ask the tracker (from Phase 3) for a fresh pool of peers.
+        // Ask the tracker (from Phase 3) for a fresh pool of peers, using a
+        // real info hash so the swarm is a real one.
         TrackerRequest request;
         request.announceUrl = "https://tracker.opentrackr.org/announce";
-        request.infoHash = torrent.infoHash;
+        request.infoHash = fixture::liveInfoHash();
         request.peerId = generatePeerId();
         request.port = 6881;
-        request.left = torrent.length;
+        request.left = fixture::kLiveLength;
         request.event = "";
 
         TrackerResponse response = HttpTracker::announce(request);
@@ -826,7 +900,8 @@ int runTests() {
                     attempts++;
                     // Phase 4: connect and convince this peer we share a torrent.
                     PeerHandshake::Result result =
-                        PeerHandshake::perform(peer, torrent.infoHash, generatePeerId(), kHandshakeTimeoutSeconds);
+                        PeerHandshake::perform(peer, fixture::liveInfoHash(),
+                                            generatePeerId(), kHandshakeTimeoutSeconds);
 
                     if (result.ok) {
                         successes++;
@@ -844,10 +919,10 @@ int runTests() {
                 announces++;
                 TrackerRequest again;
                 again.announceUrl = "https://tracker.opentrackr.org/announce";
-                again.infoHash = torrent.infoHash;
+                again.infoHash = fixture::liveInfoHash();
                 again.peerId = generatePeerId();
                 again.port = 6881;
-                again.left = torrent.length;
+                again.left = fixture::kLiveLength;
                 again.event = "";
                 try {
                     response = HttpTracker::announce(again);
@@ -886,12 +961,10 @@ int runTests() {
     std::cout << "\n--- Deterministic loopback test (FakePeer) ---\n";
 
     try {
-        TorrentFile torrent = TorrentParser::parse("test/ubuntu-24.04.1-desktop-amd64.iso.torrent");
-
-        // A fake peer on 127.0.0.1 that serves our torrent. Its peer_id must
+        // A fake peer on 127.0.0.1 that serves "our" torrent. Its peer_id must
         // be exactly 20 bytes.
         const std::string serverPeerId = "-PF0001-000000000000";
-        FakePeer server(torrent.infoHash, serverPeerId);
+        FakePeer server(fixture::liveInfoHash(), serverPeerId);
         server.start();
 
         Peer fakePeer;
@@ -899,7 +972,8 @@ int runTests() {
         fakePeer.port = server.port();  // use the ephemeral port the OS chose
 
         PeerHandshake::Result result =
-            PeerHandshake::perform(fakePeer, torrent.infoHash, generatePeerId(), 4);
+            PeerHandshake::perform(fakePeer, fixture::liveInfoHash(),
+                                    generatePeerId(), 4);
 
         server.join();  // wait for the accept thread to finish handling
 
