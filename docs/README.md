@@ -42,6 +42,13 @@ reference while browsing the code.
 | [10 – Phase 8: From library to client](10-phase8-client.md) | Turning the engine into something you can run | the CLI, UDP trackers, announce-list tiers, connection reuse, the live display, and the bugs found along the way |
 | [11 – Reference](11-reference.md) | Everything reusable + the full file map + the test suite | `TcpSocket`, `Bitfield`, `PeerSession`, `PathSafety`, "never trust the network", all 38 tests |
 
+> **Looking for a hands-on teaching track instead?** This manual is the
+> *reference*. For a code-first course that teaches the C++ language itself,
+> the build, and the concurrency design — written for a Java developer new to
+> C++ — see **[12-tutor/](12-tutor/README.md)**. The two are meant to be read
+> together: this folder for the *what*, the tutor track for the *how* and the
+> *why not*.
+
 ## Where the actual code lives
 
 ```
