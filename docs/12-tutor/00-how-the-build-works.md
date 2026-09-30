@@ -59,7 +59,8 @@ you, and you can change the recipe and re-cook without rewriting it.
 
 A **source file** contains actual instructions. It has code in it.
 
-`src/main.cpp` starts like this:
+`src/main.cpp` has 31 lines of comment at the top explaining what the program
+is for, and then the includes begin:
 
 ```cpp
 #include "peer/ConcurrentDownloader.hpp"
@@ -127,6 +128,29 @@ without re-reading your implementation. `main.cpp` needs to know that
 `TorrentFile` has a `.name` field. It shouldn't have to read the 314 lines of
 `TorrentParser.cpp` to learn that.
 
+**🟡 GOOD TO KNOW — but headers aren't purely declarations.** Five of this
+project's 25 headers do contain code, all of it tiny. From
+`include/peer/Bitfield.hpp`:
+
+```cpp
+size_t pieceCount() const { return pieceCount_; }
+size_t byteSize()    const { return bytes_.size(); }
+bool    complete()   const { return pieceCount_ > 0 && count() == pieceCount_; }
+```
+
+Those one-line functions are called **accessors** — they hand a field back to
+whoever asks for it. They live in the header because there is no reason to put
+a one-liner somewhere else.
+
+> **🎯 The accurate rule:** the header makes a type *visible* and usually
+> *declares* it. Sometimes it also defines small things. The substantial work
+> is in the `.cpp`.
+
+**This is exactly why `#pragma once` matters.** If a header defines code and
+gets pasted into a file twice, the compiler sees the same function defined
+twice and complains. Declaration-only headers would be harmless; definition-
+carrying headers are not.
+
 > ### **Java parallel**
 >
 > Similar to an interface, or a public class signature. But C++ takes it
@@ -172,9 +196,11 @@ Every header starts with:
 **🟢 MUST KNOW NOW.** This says *"only paste my contents into this file once,
 no matter how many times I'm included."*
 
-Without it, a file including two headers that both include a third would get
-that third header's contents twice — and the compiler would complain about
-defining the same struct twice.
+Why does that matter here? Because **five of this project's headers define
+code**, not just declare it. Without `#pragma once`, a file that included
+`Bitfield.hpp` twice — directly and indirectly by way of two other headers —
+would get `size_t pieceCount() const { ... }` pasted in twice, and the
+compiler would reject the duplicate definition.
 
 > **Java parallel:** Java's `import` already does this for you, automatically.
 > C++ has no import system, so each header defends itself. `#pragma once` is
@@ -210,7 +236,7 @@ The **linker** takes all the `.o` files and:
 Output here:
 
 ```
-build/peerflow          939 KB, a real runnable program
+build/peerflow          a real runnable program
 ```
 
 > ### **WITHOUT vs WITH**
@@ -306,14 +332,23 @@ is *generated*. You never type inside it.
 build/
 ├── CMakeCache.txt     the answers to CMake's questions
 ├── Makefile           the generated instructions
+├── compile_commands.json   every compile command, recorded
 ├── libpeerflow_core.a  the middle layer, as one big file
 ├── peerflow            the program you run
 ├── peerflow-tests      the test program
-└── CMakeFiles/.../    the 20 .o files, buried
+├── CMakeFiles/.../    the 20 .o files, buried
+└── phase6-*.bin       scratch files the test suite left behind
 ```
 
-**🎯 Mental model:** `build/` is a scratch space. `rm -rf build` and it comes
-back correct. It is disposable.
+> ### **The `.bin` files**
+>
+> After you run the tests, `build/` fills up with files like `phase6-out.bin`.
+> Those are the test suite's scratch files. `ls build/` will show you more than
+> the list above — that is normal, and nothing is wrong.
+>
+> It is the clearest possible demonstration that `build/` is disposable.
+> **🎯 Mental model:** `build/` is a scratch space. `rm -rf build` and it comes
+> back correct. It is disposable.
 
 > ### **WITHOUT vs WITH**
 >
@@ -345,7 +380,7 @@ The actual engine. All 17 of the project's `.cpp` files, in one file.
 **2. `peerflow` — the program**
 
 ```
-build/peerflow      939 KB
+build/peerflow      920 KB, one runnable program
 ```
 
 Run it: `./build/peerflow some-file.torrent`
@@ -353,7 +388,7 @@ Run it: `./build/peerflow some-file.torrent`
 **3. `peerflow-tests` — the test program**
 
 ```
-build/peerflow-tests    765 KB
+build/peerflow-tests    748 KB
 ```
 
 Run it: `./build/peerflow-tests` — this runs the project's 38 checks.
@@ -396,17 +431,31 @@ Torrent_Client/
 │   ├── peer/
 │   ├── piece/
 │   ├── ui/
-│   └── util/
+│   ├── util/
+│   └── tests/
 ├── src/                ← source: "here's how things work"
 │   ├── main.cpp        the entry point
+│   ├── tests/          the test suite (2 files, ~1,500 lines)
 │   ├── bencode/
 │   ├── torrent/
-│   └── ... (mirrors include/)
+│   └── ... (the same folders as include/, plus main.cpp)
 ├── test/               a .torrent file for trying things out
 └── build/              ← generated; do not edit
 ```
 
-**🎯 Mental model:** every `.hpp` in `include/` has a matching `.cpp` in
+> ### **`src/tests/` vs `test/` — easy to mix up**
+>
+> These two are unrelated, which is unfortunate:
+>
+> | | |
+> |---|---|
+> | `src/tests/` | **The test code.** Two `.cpp` files. This is what `peerflow-tests` is built from. |
+> | `test/` | **Sample data.** Holds a `.torrent` file. No code at all. |
+>
+> Both are covered properly in Module 12. For now, just remember the test
+> *code* is in `src/`, next to everything else.
+
+**🎯 Mental model:** most `.hpp` files in `include/` have a matching `.cpp` in
 `src/` with the same path.
 
 ```
@@ -414,8 +463,47 @@ include/peer/PeerSession.hpp   ← describes PeerSession
 src/peer/PeerSession.cpp       ← implements PeerSession
 ```
 
-If a header exists, there's a matching source file. If you're ever lost in the
-code, this mapping is how you find the implementation of any component.
+**🟡 GOOD TO KNOW — but 7 of the 25 headers have no `.cpp` at all.**
+
+If you go looking for `src/net/NetException.cpp`, it isn't there. That's not a
+mistake. Those 7 files are:
+
+```
+torrent/TorrentFile.hpp          struct TorrentFile
+net/NetException.hpp             class NetException
+tracker/Peer.hpp                 struct Peer
+tracker/TrackerResponse.hpp      struct TrackerResponse
+piece/FileException.hpp          class FileException
+bencode/BencodeValue.hpp         class BencodeValue
+bencode/BencodeException.hpp     class BencodeException
+```
+
+They're all small — 18 to 43 lines — and all are either a **plain data
+holder** (`struct TorrentFile`, `struct Peer`) or an **exception type**.
+
+> ### **WITHOUT vs WITH**
+>
+> ```
+> A header that DEFINES something big
+>   Needs a .cpp, or the code gets compiled separately into every file that
+>   includes it. Duplicated work, and a real risk of the classic
+>   "multiple definition" linker error.
+>
+> A header that just DESCRIBES something
+>   No code lives there, so no .cpp is needed. This is the common case, and
+>   it is why you will find .hpp files with no partner.
+>
+> The rule  if you open a .hpp and find actual function bodies in it, expect
+>          there is no matching .cpp. If you find only field names and
+>          declarations, go look for the .cpp.
+> ```
+
+**The rule:** if you open a header and find real function bodies in it, the
+implementation is right there. If you find only field names and declarations,
+go look for the `.cpp`.
+
+This is the one place where "every header has a source file" is false, so it
+is worth checking by hand the first time you go looking for something.
 
 ---
 
@@ -426,12 +514,18 @@ The compiler works on **one file at a time**. The linker joins the results.
 This means: **if you change one file, only that one file needs recompiling.**
 The other 19 `.o` files are already correct.
 
-We measured this on your machine:
+We measured this on your machine. You can reproduce it:
+
+```bash
+touch src/main.cpp                          && cmake --build build   # ~2 s
+touch include/torrent/TorrentFile.hpp       && cmake --build build   # ~15 s
+cmake --build build                                          # ~0.2 s
+```
 
 | You changed | What got rebuilt | Time |
 |---|---|---|
-| nothing | nothing | 1.1 s |
-| `src/main.cpp` (1 file) | 1 file + relink | 6.1 s |
+| nothing | nothing | 0.2 s |
+| `src/main.cpp` (1 file) | 1 file + relink | 2.1 s |
 | `include/torrent/TorrentFile.hpp` (32 lines) | **7 files** + relink 3 things | 15.0 s |
 
 The last row is interesting: that header has no instructions in it at all, yet
@@ -454,14 +548,24 @@ You can always skip the build system. The file `build/compile_commands.json`
 records the **exact** command CMake ran for each file. For `main.cpp` it was:
 
 ```bash
-c++ -I/home/.../include -std=gnu++17 -o main.cpp.o -c src/main.cpp
+/usr/bin/c++ -I/home/.../Torrent_Client/include -std=gnu++17 \
+    -o CMakeFiles/peerflow.dir/src/main.cpp.o \
+    -c /home/.../Torrent_Client/src/main.cpp
 ```
+
+(The full paths are long; I've shortened them with `...` for readability. Run
+`python3 -m json.tool build/compile_commands.json | head` if you want to see
+them unabbreviated.)
 
 Read it as: *"Use the C++ compiler, look for headers in `include/`, use the
 2017 standard, and compile just this one file."*
 
 Now you can see that `-I.../include` is the single instruction that makes all
 those clean `#include` lines work.
+
+**🔵 LATER.** The `-o` path is nested inside `CMakeFiles/`, not in the root of
+`build/`. That's why a manual `ls build/*.o` finds nothing — the `.o` files are
+buried. Use `find build -name '*.o'` if you want to see them.
 
 ---
 
@@ -501,9 +605,14 @@ are a pair. Which one contains the actual instructions?
 
 <details><summary>Answer</summary>
 
-The `.cpp`. The `.hpp` only *describes* what a `TorrentFile` looks like —
-its fields. The `.cpp` builds one. In this project, headers never contain
-instructions.
+The `.cpp`. `TorrentFile.hpp` only declares what a `TorrentFile` looks
+like — its field names and types. `TorrentParser.cpp` is 314 lines that
+actually read a file and build one.
+
+(One wrinkle worth knowing: this project's headers aren't purely
+declarations. Five of them define small things inline, like a one-line
+accessor. So the rule is "the real work is in the `.cpp`", not "headers
+never contain code".)
 
 </details>
 
