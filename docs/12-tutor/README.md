@@ -1,138 +1,132 @@
-# Tutor Track — Learning PeerFlow End to End
+# PeerFlow — Learning Guide
 
-> **This folder is different from `docs/` next door.**
+> **Who this is for**
 >
-> `docs/01`–`docs/11` are the project's *manual*: what BitTorrent is, what each
-> phase does, and why. They are excellent and you should read them.
+> You know Java. You are new to C++ and new to networking. You learn best
+> when one idea is introduced at a time, explained in plain words, with
+> small examples.
 >
-> This folder is a **teaching track**. It fills the gaps the manual does not
-> cover — the C++ language itself, the build, the concurrency reasoning, and
-> the tests as a design tool — and it is written for a **strong Java developer
-> who is new to C++ and to networking**. It goes **code-first**: read real
-> source, understand it, then write something.
->
-> The two work together. Manual for the *what*, tutor track for the *how* and
-> the *why not*.
-
-## How a session runs
-
-1. **Read** — a specific set of files and line ranges, named in advance.
-2. **Teach** — I explain the code, in plain words, with Java parallels.
-3. **Contrast** — for every rule, the **without / with** pair: what actually
-   breaks if we skip it, and what breaks if we do it wrong. Where possible I
-   hand you a **runnable demo** in `demos/` that breaks on purpose.
-4. **Quiz** — you answer. You don't move on until you do.
-5. **Write** — a small, real change to the codebase, plus its test.
-6. **Notes** — appended to the module's file in this folder.
-
-The notes are the artifact. After the track, they are a second manual covering
-everything the first one deliberately skipped.
-
-### Why every rule comes with a contrast
-
-A rule on its own is just advice, and advice gets forgotten. A rule paired
-with a *concrete failure* is memorable — and in a codebase like this one the
-failures are real. This project shipped six of them; two are reproduced
-verbatim in `demos/`, running on your machine, offline.
-
-So the standing format of every explanation in this track is:
-
-```
-WITHOUT  ->  what actually happens (a crash, silent corruption, a hang)
-WITH     ->  what the code does instead, and what that costs us
-THE RULE ->  the one line worth remembering
-```
-
-The third part matters most. Nearly every rule in this codebase exists to
-spend a little verbosity to eliminate an entire *category* of bug. That trade
-is the house style, and once you see it you can predict most of the code
-without reading it.
-
-## The demos
-
-Runnable programs that demonstrate a contrast by actually breaking. No network
-access, no torrent file, no setup — just a compiler.
-
-```bash
-g++ -O0 -std=c++17          -o /tmp/demo01 docs/12-tutor/demos/demo-01-byte-order.cpp && /tmp/demo01
-g++ -O0 -std=c++17 -pthread -o /tmp/demo02 docs/12-tutor/demos/demo-02-recvExact.cpp && /tmp/demo02
-```
-
-| Demo | The contrast it proves | Origin |
-|---|---|---|
-| `demo-01-byte-order.cpp` | the shipped reversed-IP bug vs the `memcpy` fix | commit `a4e60e4` |
-| `demo-02-recvExact.cpp` | one naive `recv()` vs `recvExact()` | **found a live bug — see [00-orientation §9](00-orientation.md#9-a-real-bug-i-found-while-writing-the-demo)** |
-
-Pipe `demo-02` through `stdbuf -o0`, or its output sits in the stdout buffer
-and appears to hang.
-
-More arrive as the track progresses. Each one is a bug this codebase either
-shipped or could plausibly have shipped.
-
-## The map
-
-| # | Module | The one thing it teaches | Notes |
-|---|---|---|---|
-| 0 | [Orientation](00-orientation.md) | the build, the targets, the shape of the whole program | ✅ done |
-| 1a | [C++ types, const, references](01a-cpp-types.md) | headers vs sources, `const&`, fixed-width ints, tagged unions | ⬜ |
-| 1b | [C++ ownership](01b-cpp-ownership.md) | RAII, move, `= delete`, vector invalidation | ⬜ |
-| 2 | Bencode | recursion over bytes; parsing untrusted input | ⬜ |
-| 3 | Torrent parser | the info hash, and why raw bytes ≠ re-encoding | ⬜ |
-| 4 | **Sockets** ⭐ | fds, DNS, TCP-as-stream, timeouts that actually time out | ⬜ |
-| 5 | HTTP/HTTPS tracker | HTTP by hand, TLS, and the byte-order bug | ⬜ |
-| 6 | UDP trackers | datagrams, BEP 15, tiers, deadlines | ⬜ |
-| 7 | Wire protocol | the 68-byte handshake, framing, bitfields | ⬜ |
-| 8 | Pieces and disk | verify-before-write, preallocation, resume | ⬜ |
-| 9 | **Concurrency** ⭐ | threads, atomics, the claim/watchdog design | ⬜ |
-| 10 | Peer sessions | connection reuse, pipelining, choke ≠ failure | ⬜ |
-| 11 | CLI, UI, path safety | arg parsing, ANSI, signals, untrusted filenames | ⬜ |
-| 12 | Testing | `FakePeer` as a lever; what is *not* tested | ⬜ |
-| 13 | [Bug archaeology](13-bug-archaeology.md) | six real bugs, reconstructed from git | ⬜ |
-| 14+ | Build Phase 9 & 10 | multi-file, seeding, DHT | ⬜ |
-
-⭐ = the two modules where the real understanding lives. Expect them to take
-longer than the rest. Everything else is comparatively quick once you're past
-the C++ and networking basics.
-
-## The two questions this track keeps asking
-
-Every design decision in this codebase answers one of two questions. Once you
-internalise them, most of the code explains itself:
-
-> **1. Is this value trusted?** Everything in a `.torrent` file — the filename,
-> the piece count, the tracker URLs, every byte off a peer's socket — is chosen
-> by a stranger. The code's job is to *check lengths, check hashes, check
-> lengths again* before believing any of it. `PathSafety` refusing
-> `../../.ssh/authorized_keys` instead of cleaning it is the same instinct as
-> rejecting a PIECE block that isn't exactly the size we asked for.
-
-> **2. Who owns this resource, and when does it die?** In Java the GC answers
-> that. In C++ you must answer it at every allocation. `TcpSocket` deleting its
-> copy constructor is not pedantry — two objects closing one file descriptor is
-> a real, hard-to-debug failure. This is the single biggest adjustment for a
-> Java developer, and it gets a whole module (1b).
-
-## The prerequisite vocabulary
-
-Plain-English definitions, used throughout these notes. The manual in `docs/01`
-has the full glossary; these are the ones you need constantly.
-
-| Term | Meaning |
-|---|---|
-| **file descriptor (fd)** | a small integer the OS hands you when you open a file or socket. `3` is "the next free fd". Closing it releases the resource. |
-| **stream vs datagram** | TCP is a stream (ordered, reliable, no message boundaries). UDP is a datagram (unreliable, but each one arrives whole or not at all). |
-| **byte order (endianness)** | how a multi-byte number is laid out in memory. The network has one order; most CPUs today have the other. This project converts at every boundary. |
-| **checksum / hash** | a fixed-size "fingerprint" of data that changes completely if a single byte changes. SHA-1 gives 20 bytes. |
-| **piece** | a fixed-size slice of the file — the unit of verification. |
-| **block** | a 16 KiB sub-slice of a piece — the unit of transfer. |
-| **peer** | any other machine in the same swarm. |
-| **seeder** | a peer that has 100% of the file. |
-| **swarm** | all peers sharing one torrent. |
-| **announce** | the request you send a tracker to register yourself and ask for peers. |
-| **info hash** | SHA-1 of the torrent's `info` dictionary. The torrent's identity. |
-| **RAII** | "Resource Acquisition Is Initialization": acquire in the constructor, release in the destructor, so leaks are impossible by construction. |
-| **UB (undefined behaviour)** | code the C++ standard places no requirements on. Often "works until it doesn't". This project defends against it deliberately. |
+> **This guide is written for exactly that.** It will not assume you already
+> know about sockets, build systems, threads, or the C++ memory model. If a
+> concept isn't needed yet, it isn't here — you'll be told when we reach it.
 
 ---
 
-*[Back to the main guide](../README.md)*
+## Start here
+
+```bash
+cmake -B build
+cmake --build build
+./build/peerflow --help
+```
+
+Those three lines build the program. [Module 0](00-how-the-build-works.md)
+explains what each one actually does.
+
+Then read, in this order:
+
+1. [Module 0 — How the project is built](00-how-the-build-works.md) *(start here)*
+2. [Module 1 — C++ basics you need](01-cpp-basics.md)
+
+---
+
+## The 12 modules
+
+Each module builds on the last. Don't skip ahead — later modules assume the
+earlier ones.
+
+| # | Module | You will be able to |
+|---|---|---|
+| 0 | [How the project is built](00-how-the-build-works.md) | Explain what `cmake -B build` and `cmake --build build` do, and what the files in `build/` are |
+| 1 | [C++ basics you need](01-cpp-basics.md) | Read the project's C++: types, references, classes, `const`, `vector`, `string` |
+| 2 | [Bytes and binary data](02-bytes-and-binary.md) | Understand how a number becomes bytes on the wire, and what "byte order" means |
+| 3 | [`.torrent` files and bencode](03-torrent-and-bencode.md) | Explain what a `.torrent` file contains and how the code reads one |
+| 4 | [Networking basics](04-networking-basics.md) | Understand IP addresses, ports, TCP, and sockets — from the ground up |
+| 5 | [Trackers](05-trackers.md) | Explain what an "announce" is and how the code asks a tracker for peers |
+| 6 | [Talking to peers](06-peers.md) | Explain the 68-byte handshake and the messages two peers exchange |
+| 7 | [Pieces and blocks](07-pieces-and-blocks.md) | Explain how a file is split, requested, and checked for correctness |
+| 8 | [Writing to disk](08-writing-to-disk.md) | Explain how verified pieces become a real file, and how downloads resume |
+| 9 | [Working at the same time](09-concurrency.md) | Explain why the download uses threads, and what a "race condition" is |
+| 10 | [How the code is organised](10-architecture.md) | Explain why the project is split into three build targets |
+| 11 | [Debugging](11-debugging.md) | Use `gdb`, `strace`, and logging to investigate a problem |
+| 12 | [Testing and real bugs](12-testing-and-bugs.md) | Explain how the project tests itself, and how bugs were found |
+
+---
+
+## How each module is written
+
+Important ideas are explained with this pattern:
+
+1. **What is it?** — in plain words
+2. **Why do we need it?** — the problem it solves
+3. **A tiny example** — the smallest thing that shows the idea
+4. **How this project uses it** — with real file names and line numbers
+5. **The one-line mental model** — something to remember
+
+**Labels tell you how much attention to give something:**
+
+| Label | Meaning |
+|---|---|
+| 🟢 **MUST KNOW NOW** | You'll need this to read the code. Explained properly. |
+| 🟡 **GOOD TO KNOW** | Helpful context. Skim it. |
+| 🔵 **LATER** | Not needed yet. It's noted so you don't worry about it. |
+
+Things marked 🔵 include: `TOCTOU` (Module 9), memory ordering (Module 9),
+`epoll` (Module 4), ABI and ELF internals (Module 0), and advanced CMake
+generator behaviour (Module 0). You do not need them now.
+
+**Tiny checks.** After an important idea you'll find a short question like
+this:
+
+> **Check your understanding**
+>
+> If `main.cpp` changes, do we need to recompile `peer.cpp`?
+>
+> <details><summary>Answer</summary>
+>
+> No. `main.cpp` and `peer.cpp` are compiled separately into separate object
+> files. Changing one doesn't change the other, so only the one you touched
+> gets recompiled. This is why builds are fast.
+>
+> </details>
+
+Fold the answer yourself, or just scroll. They're there to check yourself, not
+to test you.
+
+---
+
+## Two important things about this project
+
+**Everything in a `.torrent` file is untrusted.** The file name, the tracker
+addresses, the piece count — all of it was chosen by a stranger who published
+it. The code checks these things rather than trusting them. You'll see this
+constantly, and it explains a lot of otherwise-odd-looking code.
+
+**The code compares against the original Java-friendly explanations.** The
+project was written with Java readers in mind, so many files already contain
+"in Java this is…" notes. Those are useful, but they sometimes skip steps.
+This guide fills the gaps.
+
+---
+
+## A note on terms
+
+Some words in the code are ordinary English but are not used that way:
+
+| Word | What it means here |
+|---|---|
+| **peer** | another computer downloading the same file |
+| **tracker** | a server that tells you which peers exist |
+| **swarm** | all the peers downloading one file |
+| **piece** | a fixed-size chunk of the file (the unit of checking) |
+| **block** | a smaller chunk of a piece (the unit of transfer) |
+| **seeder** | a peer that already has the whole file |
+| **announce** | the message that tells a tracker you exist |
+| **info hash** | a 20-byte fingerprint identifying one torrent |
+
+We introduce each properly when we reach it. You don't need to memorise this
+table.
+
+---
+
+*[Back to the main README](../README.md)*

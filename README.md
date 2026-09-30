@@ -121,8 +121,8 @@ does less.
   manual written for everyone, with all the theory (networking, bencode,
   hashing, endianness) explained in plain words.
 - **[The Tutor Track → `docs/12-tutor/`](docs/12-tutor/README.md)** — a
-  code-first teaching course, starting from the build and the C++ language
-  itself, for a strong Java developer new to C++ and networking.
+  beginner-first learning guide. Starts from "what is a compiler" and builds up
+  to how the download works, one idea at a time, with Java comparisons.
 - [Big-picture guide](docs/01-big-picture.md)
 - [BitTorrent specification](https://wiki.theory.org/BitTorrentSpecification)
 - [BEP 12 — Multi-Tracker Metadata](https://www.bittorrent.org/beps/bep_0012.html)

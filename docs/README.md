@@ -43,11 +43,13 @@ reference while browsing the code.
 | [11 – Reference](11-reference.md) | Everything reusable + the full file map + the test suite | `TcpSocket`, `Bitfield`, `PeerSession`, `PathSafety`, "never trust the network", all 38 tests |
 
 > **Looking for a hands-on teaching track instead?** This manual is the
-> *reference*. For a code-first course that teaches the C++ language itself,
-> the build, and the concurrency design — written for a Java developer new to
-> C++ — see **[12-tutor/](12-tutor/README.md)**. The two are meant to be read
-> together: this folder for the *what*, the tutor track for the *how* and the
-> *why not*.
+> *reference* — it explains what BitTorrent is and what each phase does. It
+> assumes you already know C++ and networking.
+>
+> For a beginner starting from the build system, read
+> **[12-tutor/](12-tutor/README.md)** instead — it builds up from "what is a
+> compiler" to "how the download works", one idea at a time, with Java
+> comparisons throughout.
 
 ## Where the actual code lives
 
