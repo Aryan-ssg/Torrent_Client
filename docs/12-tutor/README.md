@@ -26,7 +26,10 @@ explains what each one actually does.
 Then read, in this order:
 
 1. [Module 0 — How the project is built](00-how-the-build-works.md) *(start here)*
-2. [Module 1 — C++ basics you need](01-cpp-basics.md)
+1. [Module 1 — C++ basics you need](01-cpp-basics.md) *(written)*
+
+Modules 2–12 aren't written yet. The table above lists what each one will
+cover so you can see where you're heading.
 
 ---
 
@@ -38,7 +41,7 @@ earlier ones.
 | # | Module | You will be able to |
 |---|---|---|
 | 0 | [How the project is built](00-how-the-build-works.md) | Explain what `cmake -B build` and `cmake --build build` do, and what the files in `build/` are |
-| 1 | [C++ basics you need](01-cpp-basics.md) | Read the project's C++: types, references, classes, `const`, `vector`, `string` |
+| 1 | [C++ basics you need](01-cpp-basics.md) *(written)* | Read the project's C++: types, references, `const`, `struct` vs `class`, enums, ownership |
 | 2 | [Bytes and binary data](02-bytes-and-binary.md) | Understand how a number becomes bytes on the wire, and what "byte order" means |
 | 3 | [`.torrent` files and bencode](03-torrent-and-bencode.md) | Explain what a `.torrent` file contains and how the code reads one |
 | 4 | [Networking basics](04-networking-basics.md) | Understand IP addresses, ports, TCP, and sockets — from the ground up |
