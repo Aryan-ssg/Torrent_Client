@@ -117,13 +117,6 @@ does less.
 
 ## Learn more
 
-- **[The Complete Guide → `docs/`](docs/README.md)** — a friendly, phase-by-phase
-  manual written for everyone, with all the theory (networking, bencode,
-  hashing, endianness) explained in plain words.
-- **[The Tutor Track → `docs/12-tutor/`](docs/12-tutor/README.md)** — a
-  beginner-first learning guide. Starts from "what is a compiler" and builds up
-  to how the download works, one idea at a time, with Java comparisons.
-- [Big-picture guide](docs/01-big-picture.md)
 - [BitTorrent specification](https://wiki.theory.org/BitTorrentSpecification)
 - [BEP 12 — Multi-Tracker Metadata](https://www.bittorrent.org/beps/bep_0012.html)
 - [BEP 15 — UDP Tracker Protocol](https://www.bittorrent.org/beps/bep_0015.html)
